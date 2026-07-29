@@ -1,0 +1,248 @@
+# Canonical workflow configuration for Engineering Workflow v1.
+# This file is the SINGLE source of truth for stages, the state machine, the
+# single workflow form + comprehension gate, closure, and decisions. All other
+# docs describe/reference it and must not contradict it. (`workflow.yml` retired.)
+
+project:
+  name: MediaServing
+  slug: media-serving
+  description: Self-hosted Cloudinary-like media processing API (Fastify 5 + Sharp + FFmpeg, S3-compatible storage, Redis/BullMQ worker). Originals upload once; derived media is generated on demand and cached back into S3.
+
+workflow:
+  version: v1
+
+stages:
+  - intake
+  - research
+  - spec
+  - plan
+  - review
+  - implement
+  - verify
+
+# ---------------------------------------------------------------------------
+# Canonical ticket state machine. `blocked` is NOT a state; it is an orthogonal
+# flag carried in artifact front-matter (see artifact_status). Each entry lists
+# the ONLY allowed next states; anything not listed is a forbidden transition.
+# ---------------------------------------------------------------------------
+lifecycle:
+  # Single canonical owner of ticket state (ADR-003). Commands read/write this
+  # file and must never infer state from artifact existence.
+  state_record: _specs/<ticket>/ticket.md
+  initial: draft
+  terminal: closed
+  states:
+    draft:                       [ready-for-research, closed]
+    ready-for-research:          [research-complete, closed]
+    research-complete:           [spec-complete, research-complete, closed]
+    spec-complete:               [plan-complete, research-complete, closed]
+    plan-complete:               [approved, plan-complete, spec-complete, closed]
+    approved:                    [implementation-in-progress, plan-complete, closed]
+    implementation-in-progress:  [implemented, closed]
+    implemented:                 [verified, implementation-in-progress, closed]
+    verified:                    [closed, implementation-in-progress]
+    closed:                      []   # terminal — no reopen; open a new ticket
+  artifact_status: [not_started, in_progress, blocked, complete]
+
+# ---------------------------------------------------------------------------
+# Single uniform workflow form (ADR-011). There are NO execution modes and NO
+# risk tiers: every ticket runs the same seven stages with the same safeguards.
+# A single OWNER carries the ticket end to end and runs its own gates
+# (self-review is expected) — there is no separate reviewer and no separation of
+# duties. Gate integrity comes from the COMPREHENSION check (comprehension_gates),
+# not a second person. `standard`/`high_risk`/`fast` are gone; the `mode`
+# front-matter field is a legacy single value (`mode: standard`).
+# ---------------------------------------------------------------------------
+workflow_form:
+  legacy_mode_value: standard   # the sole legal `mode:` value in artifact front-matter
+  stages: [intake, research, spec, plan, review, implement, verify]
+  owner_runs_own_gates: true    # the ticket owner runs /review and /verify themselves
+  approvals: 1                  # a single self-approval by the owner
+  adr_required: false           # ADRs optional (record notable decisions if useful)
+  verification: all-ac          # every acceptance criterion mapped to a result
+  review_gate: always           # /review + /verify are mandatory steps, never skipped
+
+# ---------------------------------------------------------------------------
+# Comprehension gate (ADR-011, ADR-014) — the control that replaces a second
+# reviewer, and the ONLY control that blocks a gate. At every gate the owner must
+# answer questions generated FROM the artifact under review; the gate cannot
+# record its decision until a comprehension record exists with the questions
+# answered. Enforced by CG-1..CG-6 (validation-model.md).
+# ---------------------------------------------------------------------------
+comprehension_gates:
+  enabled: true
+  required: always              # every gate, every ticket — no exceptions
+  stages: [review, verify]      # the decision gates that ask before deciding
+  questions_min: 3              # FLOOR, not a fixed count (ADR-014) — ask more when the artifact warrants it
+  integration_question: required  # ≥1 question per gate on the integration / cross-flow axis (CG-5)
+  panel_question_severity: major  # each `major` panel finding seeds 1 EXTRA question above the floor (CG-6)
+  options_min: 4                # each question offers ≥4 answers (1 correct + ≥3 distractors)
+  pass_threshold: 1.0           # 100% correct required; any wrong answer blocks the gate
+  record: _specs/<ticket>/comprehension.md
+  ai_graded: false              # optional: AI scores answers vs the artifact (off by default)
+
+# ---------------------------------------------------------------------------
+# Advisory review panel (ADR-012) — AI reviewer lenses that assist the single
+# owner at /review. Each lens is a read-only subagent (.claude/agents/) that
+# reviews plan.md + spec.md and returns findings. ADVISORY: findings inform the
+# owner but never block APPROVED — the owner still decides, and the comprehension
+# gate remains the integrity control (ADR-011). Enforced by RP-1..RP-4.
+# ADR-014: a `major` finding additionally SEEDS a comprehension question (CG-6) —
+# the owner must show they understood it, but may still dismiss it. Still no veto.
+# ---------------------------------------------------------------------------
+review_panel:
+  enabled: true
+  advisory: true                # findings inform the owner; a lens NEVER blocks the decision
+  stage: review                 # runs inside /review only, before the comprehension gate
+  lenses:                       # one read-only subagent per lens, run in parallel
+    - senior                    # .claude/agents/senior-reviewer.md
+    - security                  # .claude/agents/security-reviewer.md
+    - performance               # .claude/agents/performance-reviewer.md
+  record: _specs/<ticket>/review.md   # findings recorded in the "Panel Findings" section
+
+# ---------------------------------------------------------------------------
+# Protected runtime paths (MediaServing adaptation of the upstream
+# `observability/**` guardrail). These are the high-blast-radius areas of the
+# media pipeline: auth, the cache-key derivation, the cache-aside/lock pair, the
+# variant presets whose transform strings are embedded in cache keys, and the
+# storage/deploy surface. Note `observability/**` is deliberately NOT listed here
+# — the Prometheus config is edited freely. Under the
+# single workflow form (ADR-011) they carry NO risk tier and NO extra approval:
+# they may only be modified inside an approved /implement, when explicitly listed
+# in `plan.md` "Files to change" (GU-2/IM-5), and must carry a protected-path
+# impact statement at /verify (VF-9/TR-3).
+#
+# Wherever the rules or commands say `observability/**`, read it as "any path
+# matching protected_paths below". Globs are matched from the repo root.
+# ---------------------------------------------------------------------------
+protected_paths:
+  # --- correctness core ---
+  - "src/middleware/auth.js"              # the API-key allowlist; a slip exposes the upload endpoints
+  - "src/utils/hashGenerator.js"          # derived cache-key derivation; a change orphans the entire derived/ cache
+  - "src/utils/paramParser.js"            # KNOWN_TRANSFORM_KEYS; a wrong entry makes URL segments parse as file paths
+  - "src/services/cacheService.js"        # cache-aside read/write against S3
+  - "src/services/lockService.js"         # Redis SET NX lock; breakage means thundering herd or blanket 503s
+  # --- variant presets (transform strings are embedded in cache keys) ---
+  - "src/services/videoPreprocessor.js"   # full/preview/webp/snapshot presets
+  - "src/services/storyVideoService.js"   # story / story-fallback presets
+  # --- config & deploy surface ---
+  - "src/config/env.js"                   # .env.<NODE_ENV> loading, override: false
+  - "src/storage/s3Client.js"             # custom endpoint only when not production
+  - "src/app.js"                          # buildApp() route wiring, CORS, rate limit
+  - "Dockerfile"                          # multi-stage build, sharp musl binaries, COPY list
+  - "docker-compose.prod.yml"             # production topology
+
+# ---------------------------------------------------------------------------
+# Gate notifications (ADR-013) — a deterministic Telegram notice on every gate
+# decision, sent by a local PostToolUse hook (.claude/hooks/notify_gate.py) that
+# fires when comprehension.md is written. REUSES the existing Alertmanager
+# Telegram bot; token/chat come from a local config file or env on the dev
+# machine and are NEVER committed. The hook never edits a protected_paths file
+# and never changes workflow state (one-way, workflow -> Telegram). Enforced by
+# NT-1..NT-3.
+# ---------------------------------------------------------------------------
+notifications:
+  enabled: true
+  channel: telegram             # telegram first; email (reuse mail.ramaaz.com) added later
+  enforcement: warn             # warn (fail-open) | block (fail-closed via hook exit 2)
+  trigger: _specs/<ticket>/comprehension.md   # PostToolUse(Write|Edit) on this path — Edit included: the 2nd gate updates an existing file
+  # Delivery config: shared file .claude/notifications.json (gitignored — holds the
+  # bot token; copy from notifications.example.json). Env overrides it, higher
+  # priority (never committed): WF_TELEGRAM_BOT_TOKEN / _CHAT_ID / _TOPIC_ID,
+  # WF_NOTIFY_ENFORCEMENT, WF_NOTIFY_DRYRUN. The token reuses the Alertmanager bot.
+
+# ---------------------------------------------------------------------------
+# Single closure strategy: there is no /close command. A ticket moves
+# verified -> closed at /verify sign-off, performed by the reviewer.
+# ---------------------------------------------------------------------------
+closure:
+  # No /close command. Closure is owned by two commands:
+  strategy: no-close-command
+  paths:
+    success:                       # successful implementation
+      owner: /verify
+      performed_by: reviewer
+      transition: verified -> closed
+    rejection:                     # plan rejected at the review gate
+      owner: /review
+      performed_by: reviewer
+      transition: spec-complete -> closed
+
+# Architectural decision tracking.
+decisions:
+  location: .claude/docs/adr/
+  template: .claude/docs/adr/ADR-0000-template.md
+
+roles:
+  workflow_owner:
+    description: >-
+      Owns workflow governance — workflow evolution, governance decisions,
+      escalations, and cross-project issues. NOT a per-ticket gate; does not
+      participate in every ticket.
+  reviewer:
+    description: >-
+      The actor at a review gate (/review, /verify). Under the single-owner model
+      (ADR-011) this is normally the ticket OWNER running their own gate
+      (self-review); a distinct reviewer is not required.
+  developer:
+    description: Implements approved plans and authors ticket artifacts.
+  ai_agent:
+    description: Assists across stages within the rules in CLAUDE.md.
+  # Legacy: earlier artifacts recorded `em` as the gate/governance actor. `em`
+  # now maps to `reviewer` (per-ticket gate) and `workflow_owner` (governance).
+
+# Role authority (single-owner; separation of duties removed — validation: RA-1..RA-3).
+role_authority:
+  gate_commands: [review, verify]     # run by the ticket owner themselves (self-review) — no distinct reviewer required
+  author_commands: [start-ticket, research, spec, plan, implement]   # developer/ai_agent
+  delivery_commands: [publish-pr]     # additive (wf-004/ADR-007); developer/ai_agent. Delivery only — orthogonal to the state machine, never a gate, performs no state transition.
+  governance_owner: workflow_owner    # owns evolution/escalation; not a per-ticket gate
+separation_of_duties:
+  enabled: false
+  rule: >-
+    Single-owner model (ADR-011): there is NO separation of duties. The ticket
+    owner authors the work AND runs its /review and /verify gates themselves
+    (self-review is expected). The comprehension gate (comprehension_gates) is the
+    control against rubber-stamping — not a distinct reviewer. All recorded actors
+    (owner, history `by`) must still be defined roles.
+
+features:
+  clickup: true
+  github: true
+  observability: true    # MediaServing does run a local stack (observability/prometheus, Loki + Grafana in docker-compose).
+                         # Inert flag: nothing in rules/ or commands/ reads it. The actual guardrail is protected_paths,
+                         # which deliberately does NOT include observability/**.
+
+# ---------------------------------------------------------------------------
+# Validation profiles (WF-PILOT-003). TWO SEPARATE, ADDITIVE concepts:
+#   validation_checks   — DEFINITIONS: check-id -> command + pass condition.
+#                         Commands live ONLY here.
+#   validation_profiles — SELECTION: profile-id -> required check-ids + depth.
+#                         Profiles reference check-ids ONLY (never a command).
+# A ticket optionally names ONE profile in plan.md "Validation strategy".
+# /verify resolves profile -> checks -> commands, executes them LOCALLY
+# (deterministic, non-interactive, read-only), and records command, exit code,
+# output summary, and result mapped to AC-n. No profile referenced => unchanged
+# behavior. Local execution only — no GitHub/CI-CD/MCP/external runner.
+# Validation: VP-1..VP-5 in validation-model.md. Decision: ADR-006.
+# ---------------------------------------------------------------------------
+# NOTE: MediaServing has NO test runner, linter, formatter, or build step (see
+# CLAUDE.md). Trydos's typecheck/lint/build/knip checks have no equivalent here
+# and are deliberately absent rather than stubbed. The single available
+# deterministic, non-interactive, read-only signal is a parse check.
+validation_checks:
+  syntax:
+    description: Every source file under src/ parses (no syntax errors).
+    # Runs `node --check` once per file. Exits 0 when all parse; xargs exits 123
+    # if any file fails, so `exit-zero` is the correct pass condition.
+    command: "bash -c 'find src -name \"*.js\" -print0 | xargs -0 -n1 node --check'"
+    pass_when: exit-zero          # exit-zero | exit-code:<n>
+    # output_contains: "<substring>"   # optional additional pass condition
+
+validation_profiles:
+  # One check means one profile — a second tier here would be theatre.
+  standard:
+    description: Parse check across src/ for any MediaServing change.
+    requires:
+      - check: syntax
+        depth: all-ac             # verification depth (MO-6): all-ac for every ticket
