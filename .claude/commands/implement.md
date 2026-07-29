@@ -43,7 +43,7 @@ present); then apply:
 - **IM-5 / GU-2** — `protected_paths` may be changed only when listed in the
   approved `plan.md` "Files to change"; else block (CLAUDE.md hard-stop).
 - Branch checks:
-  - *Initial (IM-3 / GU-4):* `develop` clean AND no `ticket/<slug>` branch exists.
+  - *Initial (IM-3 / GU-4):* `main` clean AND no `ticket/<slug>` branch exists.
   - *Resume (IM-3a):* the `ticket/<slug>` branch **already exists** and is the
     current checked-out branch. If missing or mismatched → block (do not create
     a second branch).
@@ -53,7 +53,7 @@ changes, no state change.**
 
 ## Step 2 — Branch / enter (path-specific)
 
-- **Initial:** create and check out `ticket/<slug>` from clean `develop` (IM-3, the
+- **Initial:** create and check out `ticket/<slug>` from clean `main` (IM-3, the
   only branch-creation point). Update `ticket.md`: `state:
   implementation-in-progress`, `updated_at: <today>`; append:
   ```yaml
@@ -109,7 +109,7 @@ append:
 
 ## Postconditions — validate AFTER
 
-- **IM-3** initial branch from clean develop (or **IM-3a** resume used the existing
+- **IM-3** initial branch from clean main (or **IM-3a** resume used the existing
   branch, no second branch) · **IM-4** changes confined to planned files · **IM-5**
   protected paths only if in the approved plan · **IM-6** implement.md complete · **IM-9** no
   commit, no push.

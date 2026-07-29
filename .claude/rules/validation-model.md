@@ -83,7 +83,7 @@ validator enforces them as state checks (mapping in "Invocation map" below).
 | GU-1 | ERROR | Non-mutating stages (`research`, `spec`, `plan`, `review`) produced no diff outside `_specs/<ticket>/`. |
 | GU-2 | ERROR | `protected_paths` runtime is modified **only** inside an approved `/implement` stage on the ticket branch (listed in `plan.md`; CLAUDE.md hard-stop). There is no risk tier — the comprehension gate and this hard-stop are the only guards (ADR-011). |
 | GU-3 | ERROR | A command writes only inside `_specs/<ticket>/` (and, for `/implement`, the approved files on branch `ticket/<slug>`). |
-| GU-4 | ERROR | Branches are created only by the implementation-entry command (after state = `approved`), named `ticket/<slug>`, from clean `develop`. `/start-ticket` must NOT create a branch, and no branch may exist for a not-yet-approved ticket. |
+| GU-4 | ERROR | Branches are created only by the implementation-entry command (after state = `approved`), named `ticket/<slug>`, from clean `main`. `/start-ticket` must NOT create a branch, and no branch may exist for a not-yet-approved ticket. |
 
 ### RS — Research artifact (`/research`)
 | Code | Severity | Condition |
@@ -145,13 +145,13 @@ validator enforces them as state checks (mapping in "Invocation map" below).
 |------|----------|-----------|
 | IM-1 | ERROR | Precondition (entry path): *initial* state = `approved` AND `review.md` Decision = APPROVED; OR *resume* state = `implementation-in-progress`. Any other state blocks. |
 | IM-2 | ERROR | `plan.md` complete (PL-1..PL-5) with an explicit, unambiguous "Files to change" list. |
-| IM-3 | ERROR | *Initial path:* branch `ticket/<slug>` is created here (GU-4), from clean `develop`, only after approval; no pre-existing branch. |
+| IM-3 | ERROR | *Initial path:* branch `ticket/<slug>` is created here (GU-4), from clean `main`, only after approval; no pre-existing branch. |
 | IM-3a | ERROR | *Resume path:* the `ticket/<slug>` branch already exists and is checked out; `/implement` must **not** create a second branch. |
 | IM-4 | ERROR | Changes are confined to files listed in `plan.md` "Files to change". **No unrelated file is modified** (no silent scope creep). |
 | IM-5 | ERROR | `protected_paths` is modified only when listed in the approved `plan.md` "Files to change" and only inside the `/implement` stage (GU-2). No risk tier is required (ADR-011). |
 | IM-6 | ERROR | `implement.md` records files changed, deviations, and validation run. **No commit is created at `/implement`** (IM-9); commit SHAs are therefore not recorded here — committing is the delivery boundary's job (PB-8). |
 | IM-7 | ERROR | `state = implemented` requires **all** planned work complete and validation recorded. On completion update `ticket.md` (TS-4), bump `updated_at`, append history: *initial* `implementation-started` then `implementation-completed`; *resume* `implementation-resumed` then `implementation-completed`. |
-| IM-8 | ERROR | **Block on unsafe/unclear:** ambiguous plan, scope creep, dirty `develop`, branch collision/mismatch, or `protected_paths` not listed in the approved `plan.md` → make NO changes and report. |
+| IM-8 | ERROR | **Block on unsafe/unclear:** ambiguous plan, scope creep, dirty `main`, branch collision/mismatch, or `protected_paths` not listed in the approved `plan.md` → make NO changes and report. |
 | IM-9 | ERROR | `/implement` creates **no commit** and never pushes; changes remain as uncommitted working-tree edits on the local `ticket/<slug>` branch (the single publishable commit is created later by `/publish-pr`, PB-8). It never advances past `implemented`. |
 | IM-10 | ERROR | **Blocked is valid but not complete:** if work cannot continue, keep `state = implementation-in-progress`, set `status: blocked`, and `implement.md` records blocking reason + partial changes + recommended next action + whether plan revision is required. Do **not** set `implemented`. |
 

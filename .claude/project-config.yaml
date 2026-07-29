@@ -79,7 +79,6 @@ comprehension_gates:
   options_min: 4                # each question offers ≥4 answers (1 correct + ≥3 distractors)
   pass_threshold: 1.0           # 100% correct required; any wrong answer blocks the gate
   record: _specs/<ticket>/comprehension.md
-  ai_graded: false              # optional: AI scores answers vs the artifact (off by default)
 
 # ---------------------------------------------------------------------------
 # Advisory review panel (ADR-012) — AI reviewer lenses that assist the single
@@ -206,12 +205,12 @@ separation_of_duties:
     control against rubber-stamping — not a distinct reviewer. All recorded actors
     (owner, history `by`) must still be defined roles.
 
+# Which external surfaces the workflow may touch. Descriptive only — the
+# enforcement lives in the commands (ClickUp is read-only at /start-ticket, CU-3;
+# GitHub is one-way at /publish-pr, PB-4).
 features:
   clickup: true
   github: true
-  observability: true    # MediaServing does run a local stack (observability/prometheus, Loki + Grafana in docker-compose).
-                         # Inert flag: nothing in rules/ or commands/ reads it. The actual guardrail is protected_paths,
-                         # which deliberately does NOT include observability/**.
 
 # ---------------------------------------------------------------------------
 # Validation profiles (WF-PILOT-003). TWO SEPARATE, ADDITIVE concepts:

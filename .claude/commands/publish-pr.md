@@ -55,7 +55,7 @@ If any ERROR fires, stop and report the rule code + message. Make no changes.
 4. **Invoke the helper** (the only `git`/`gh` home):
    ```
    python scripts/github_publish.py --branch ticket/<slug> \
-       --title "<generated title>" --body-file <body-file> --base develop \
+       --title "<generated title>" --body-file <body-file> --base main \
        --commit-message "<generated commit message>"
    ```
    As the single git delivery boundary, the helper **stages the working-tree

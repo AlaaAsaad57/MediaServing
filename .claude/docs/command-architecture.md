@@ -180,13 +180,13 @@ to each artifact. `<ticket>` = slug.
   `implementation-in-progress`).
 - **Inputs:** `<ticket>`.
 - **Outputs:** branch `ticket/<slug>` (created on the *initial* path only, from
-  clean `develop`); code/doc changes confined to `plan.md`'s "Files to change",
+  clean `main`); code/doc changes confined to `plan.md`'s "Files to change",
   applied to the working tree on that branch (**no commit, no push** — the commit
   is created later by `/publish-pr`, the single git delivery boundary);
   `implement.md` (files changed, deviations, validation).
 - **Preconditions (entry path):**
   - *Initial:* state = `approved` AND `review.md` Decision = APPROVED; no existing
-    `ticket/<slug>` branch; `develop` clean.
+    `ticket/<slug>` branch; `main` clean.
   - *Resume:* state = `implementation-in-progress`; the `ticket/<slug>` branch
     already exists and is checked out.
   - Both: `plan.md` complete (PL-1..PL-5) with an explicit, unambiguous
@@ -203,7 +203,7 @@ to each artifact. `<ticket>` = slug.
   ticket is then recoverable by re-running `/implement` (resume) or revising via
   `/plan`.
 - **Stop / block conditions (do NOT mutate):** state ∉ {`approved`,
-  `implementation-in-progress`}; (initial) review not APPROVED / `develop` dirty /
+  `implementation-in-progress`}; (initial) review not APPROVED / `main` dirty /
   branch exists; (resume) expected branch missing or not checked out; `plan.md`
   ambiguous; `protected_paths` not listed in the approved `plan.md`.
 - **Guarantees:** never creates a second branch on resume; never modifies files
@@ -323,7 +323,7 @@ Key invariant: the only path into `implementation-in-progress` is from
   - `/start-ticket` creating a branch (workspace setup is branch-free).
   - Any branch creation while the ticket is **not READY** / before state `approved`.
   - A branch for that slug already exists (collision).
-  - Base `develop` is dirty (uncommitted changes) at branch-creation time.
+  - Base `main` is dirty (uncommitted changes) at branch-creation time.
   - Branching to modify `protected_paths` unless it is listed in the approved
     `plan.md` (review-gate approved).
 - **Rationale:** The non-mutating stages (`intake → research → spec → plan →

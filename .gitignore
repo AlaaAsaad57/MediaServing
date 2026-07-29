@@ -5,6 +5,9 @@ plan.md
 # ...but the workflow's own plan files are part of the corpus, not scratch notes.
 !.claude/commands/plan.md
 !_specs/_templates/plan.md
+# A ticket's plan is workflow evidence: /publish-pr must be able to commit the
+# whole _specs/<slug>/ folder (PB-9). Without this the plan is silently dropped.
+!_specs/**/plan.md
 USAGE_IN_CLIENTS_SITE.tsx
 
 
