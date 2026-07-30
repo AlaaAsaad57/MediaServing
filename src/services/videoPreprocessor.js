@@ -6,6 +6,7 @@ const {
   processVideo,
   extractSnapshot,
   extractRawFrame,
+  extractRawFrameFromPath,
 } = require("../processors/videoProcessor");
 const crypto = require("crypto");
 const sharp = require("sharp");
@@ -36,6 +37,12 @@ const WEBP_POSTER_QUALITY = Math.max(
     Number.parseInt(process.env.WEBP_POSTER_QUALITY || "75", 10) || 75,
   ),
 );
+// TASK concurrency: how many ffmpeg encodes run at once *within* one unit of
+// work. Three files read this key — here (the backfill script's fan-out),
+// `services/videoJobs.js` (a queue job's fan-out), and nothing else. The
+// worker's JOB concurrency is a separate key (`VIDEO_JOB_CONCURRENCY`, read only
+// by `worker.js`), because one number serving both meanings multiplied the
+// number of live ffmpeg children instead of bounding it.
 const VIDEO_PREPROCESS_CONCURRENCY = Math.max(
   1,
   Number.parseInt(process.env.VIDEO_PREPROCESS_CONCURRENCY || "4", 10) || 4,
@@ -92,8 +99,7 @@ function fullParams() {
   return params;
 }
 
-async function createWebpPosterVariant(originalBuffer) {
-  const frameBuffer = await extractRawFrame(originalBuffer, WEBP_POSTER_SECOND);
+async function posterFromFrame(frameBuffer) {
   const webpBuffer = await sharp(frameBuffer)
     .rotate()
     .resize({ width: WEBP_POSTER_WIDTH, withoutEnlargement: true })
@@ -104,6 +110,23 @@ async function createWebpPosterVariant(originalBuffer) {
     buffer: webpBuffer,
     contentType: "image/webp",
   };
+}
+
+async function createWebpPosterVariant(originalBuffer) {
+  const frameBuffer = await extractRawFrame(originalBuffer, WEBP_POSTER_SECOND);
+  return posterFromFrame(frameBuffer);
+}
+
+/**
+ * Same poster, from a file already on disk.
+ *
+ * The gated upload path tees the incoming bytes to a temp file, so it can build
+ * the poster without ever holding the original in memory. The buffer variant
+ * above is unchanged and still used by the legacy upload route and the worker.
+ */
+async function createWebpPosterVariantFromPath(inPath) {
+  const frameBuffer = await extractRawFrameFromPath(inPath, WEBP_POSTER_SECOND);
+  return posterFromFrame(frameBuffer);
 }
 
 async function runWithConcurrency(tasks, concurrency) {
@@ -317,6 +340,7 @@ module.exports = {
   webpCacheKey,
   instantCacheKey,
   createWebpPosterVariant,
+  createWebpPosterVariantFromPath,
   previewParams,
   fullParams,
   instantParams,

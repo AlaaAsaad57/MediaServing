@@ -1,6 +1,4 @@
 const fastify = require("fastify");
-const path = require("path");
-const { promises: fs } = require("fs");
 const cors = require("@fastify/cors");
 const multipart = require("@fastify/multipart");
 const rateLimit = require("@fastify/rate-limit");
@@ -9,8 +7,11 @@ const { authHook } = require("./middleware/auth");
 const { registerMetrics } = require("./middleware/metrics");
 const uploadRoutes = require("./api/upload");
 const transformRoutes = require("./api/transform");
-const statsRoutes = require("./api/stats");
 const filesRoutes = require("./api/files");
+const ticketRoutes = require("./api/ticket");
+const gatedUploadRoutes = require("./api/gatedUpload");
+const chatRoutes = require("./api/chat");
+const { isReachable } = require("./services/ticketService");
 const { randomUUID } = require("crypto");
 const { createRedisClient, initRedis } = require("./services/lockService");
 const { ValidationError } = require("./utils/paramParser");
@@ -18,9 +19,6 @@ const { ValidationError } = require("./utils/paramParser");
 // Tune libvips internal cache so Sharp reuses decoded frames across requests.
 // memory: MB of decoded pixel data to keep; items: max number of cached ops.
 sharp.cache({ memory: 128, files: 20, items: 500 });
-
-const TEST_PAGE_PATH = path.resolve(__dirname, "..", "test.html");
-const COMPARE_PAGE_PATH = path.resolve(__dirname, "..", "compare.html");
 
 function toInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
@@ -149,7 +147,11 @@ function buildApp(opts = {}) {
   app.register(cors, {
     origin: parseCorsOrigin(process.env.CORS_ORIGIN),
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-API-Key", "Range"],
+    // X-Upload-Ticket is ADDED, X-API-Key is not removed: the legacy routes are
+    // deliberately still serving until the cutover, and dropping their header
+    // here would break browser callers mid-migration — the exact failure the
+    // parallel route family exists to prevent.
+    allowedHeaders: ["Content-Type", "X-API-Key", "X-Upload-Ticket", "Range"],
     exposedHeaders: ["Content-Length", "Content-Range", "Accept-Ranges"],
   });
 
@@ -244,66 +246,31 @@ function buildApp(opts = {}) {
   // Global auth hook
   app.addHook("preHandler", authHook);
 
-  // Health check (no auth — skipped by authHook)
+  // Health check (no auth — skipped by authHook).
+  //
+  // The permission store is reported but does NOT change the status code: this
+  // endpoint is the container's liveness probe, and a Redis blip must not cause
+  // a restart. Gated uploads fail on their own routes with 503 instead.
   app.get("/health", { config: { rateLimit: false } }, async () => ({
     status: "ok",
+    ticket_store: (await isReachable()) ? "ok" : "unavailable",
   }));
 
-  async function serveTestPage(reply) {
-    try {
-      const html = await fs.readFile(TEST_PAGE_PATH, "utf8");
-      const apiKeyLiteral = JSON.stringify(process.env.API_KEY || "");
-      const hydratedHtml = html.replace(/"__TEST_API_KEY__"/g, apiKeyLiteral);
-      return reply.type("text/html; charset=utf-8").send(hydratedHtml);
-    } catch {
-      return reply.code(404).send({ error: "test.html not found" });
-    }
-  }
-
-  async function serveComparePage(reply) {
-    try {
-      let html = await fs.readFile(COMPARE_PAGE_PATH, "utf8");
-      html = html.replace(
-        /"__TEST_API_KEY__"/g,
-        JSON.stringify(process.env.API_KEY || ""),
-      );
-      html = html.replace(
-        /"__CLOUDINARY_CLOUD_NAME__"/g,
-        JSON.stringify(process.env.CLOUDINARY_CLOUD_NAME || ""),
-      );
-      html = html.replace(
-        /"__CLOUDINARY_PRESET__"/g,
-        JSON.stringify(process.env.CLOUDINARY_UPLOAD_PRESET || ""),
-      );
-      return reply.type("text/html; charset=utf-8").send(html);
-    } catch {
-      return reply.code(404).send({ error: "compare.html not found" });
-    }
-  }
-
-  // Public test panel route for deployment checks.
-  app.get("/test", { config: { rateLimit: false } }, async (_, reply) =>
-    serveTestPage(reply),
-  );
-
-  app.get("/test.html", { config: { rateLimit: false } }, async (_, reply) =>
-    serveTestPage(reply),
-  );
-
-  // Benchmark comparison page.
-  app.get("/compare", { config: { rateLimit: false } }, async (_, reply) =>
-    serveComparePage(reply),
-  );
-
-  app.get("/compare.html", { config: { rateLimit: false } }, async (_, reply) =>
-    serveComparePage(reply),
-  );
+  // The debug pages (/test, /compare) and the statistics page and its LogQL
+  // proxy are gone: each injected the API key into unauthenticated HTML, and
+  // stats additionally proxied arbitrary queries with no authentication.
 
   // Routes
   app.register(uploadRoutes);
   app.register(transformRoutes);
-  app.register(statsRoutes);
   app.register(filesRoutes);
+  // Ticket-authorized family. Ships beside the routes above; the static key is
+  // never accepted under /gated/*.
+  app.register(ticketRoutes);
+  app.register(gatedUploadRoutes);
+  // Chat attachments: a ticket-authorized upload that does no processing, plus
+  // the public delivery route for the URL it returns.
+  app.register(chatRoutes);
 
   // Global error handler
   app.setErrorHandler((error, request, reply) => {

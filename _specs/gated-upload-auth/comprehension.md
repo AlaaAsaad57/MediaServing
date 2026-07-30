@@ -1,13 +1,13 @@
 ---
 ticket: gated-upload-auth
-stage: review              # the gate that last updated this record
+stage: verify              # the gate that last updated this record
 mode: standard             # single workflow form — no other modes (ADR-011)
 status: complete           # not_started | in_progress | complete
 owner: developer           # the ticket owner (self-review)
 updated: 2026-07-29
 result: passed             # quiz outcome — were ALL answers correct? (CG-4)
 score: 4/4                 # correct / total
-decision: APPROVED         # gate decision (the notification hook reads these — ADR-013)
+decision: PASSED           # gate decision (the notification hook reads these — ADR-013)
 missed:                    # empty when passed
 links:
   clickup:
@@ -55,10 +55,15 @@ links:
 > plan's declared Integration surface held. Answered before recording PASSED at
 > `/verify`. No panel here (ADR-012) — CG-6 does not apply.
 
+> Asked after the **second** verification run (the first returned FAILED on AC-8
+> and AC-19; both were fixed at `/implement` resume). Four questions against a
+> floor of three. No panel at `/verify`, so CG-6 does not apply.
+
 | # | Question (from the artifact) | Source (implement.md/AC-n/plan §) | Axis | Options (correct + distractors) | Owner's answer | Correct? |
 |---|------------------------------|-----------------------------------|------|---------------------------------|----------------|----------|
-| 1 |                              |                                   |      |                                 |                |          |
-| 2 |                              |                                   |      |                                 |                |          |
-| 3 |                              |                                   | integration (CG-5) |                   |                |          |
+| 1 | The plan called the video helpers the sharpest overlap — shared by the legacy route, the worker and the new gated route. What did the implementation actually do? | `plan.md > Integration surface`; `implement.md` (Changes made → `videoProcessor.js`, `videoPreprocessor.js`) | **integration (CG-5)** | a) Buffer signatures replaced by paths. b) Moved every caller onto paths. c) **Path variants added alongside — `*FromPath` added, buffer signatures untouched, because the legacy route and the worker still pass buffers; replacing rather than extending would have broken both at once, and neither is exercised by gated tests. (correct)** d) Wrapped inside the gated route, reading the temp file back into a buffer. | c) Path variants added alongside | ✅ |
+| 2 | AC-8 first failed: 11 MB against a 10 MB cap returned 201 and stored a truncated object. What was the actual cause? | `implement.md > Rework`; AC-8; `verify.md` (first run) | defect / correctness | a) Busboy rejected the part early. b) Redis rejected the oversized ticket. c) The counting guard used the wrong limit. d) **The multipart limit truncates — `@fastify/multipart` enforces `limits.fileSize` by truncating the stream and ending it normally rather than raising, so the guard never saw the excess. (correct)** | d) The multipart limit truncates | ✅ |
+| 3 | After the fix, what stops an object whose bytes were never recognised from rendering in the browser? | `implement.md > Rework` (AC-19); AC-19; `spec.md` FR-25 | content safety | a) A second sniff on delivery. b) **Extension picks the path, stored content type sets the disposition — no extra storage call, and a legacy object with a friendly extension but a dangerous stored type still downloads. (correct)** c) Sharp converts and serves inline. d) Rejected at upload. | b) Extension picks path, type sets disposition | ✅ |
+| 4 | If this branch were reverted, what would be left behind or need undoing? | `plan.md > Rollback`; `implement.md > Deviations` (5) | rollback / residual | a) Attribution must be stripped from stored objects. b) **Nothing migrated; the gitignored `.env` keys stay behind — they were never in the commit, and `GATEWAY_BASE_URL` must be set in the deployment or every mint answers 503. (correct)** c) Stored objects need re-keying. d) The two passes revert independently. | b) Nothing migrated; .env keys stay | ✅ |
 
-- Score (optional, only if `comprehension_gates.ai_graded`): n/a
+- Score (optional, only if `comprehension_gates.ai_graded`): 4/4 — 1.0

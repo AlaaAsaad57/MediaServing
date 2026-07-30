@@ -23,7 +23,11 @@ services:
       S3_SECRET_KEY: minioadmin
       REDIS_URL: redis://redis:6379
       NODE_OPTIONS: --max-old-space-size=2048
-      VIDEO_PREPROCESS_CONCURRENCY: "4"
+      # TASK concurrency: ffmpeg encodes within one unit of work.
+      VIDEO_PREPROCESS_CONCURRENCY: "1"
+      # JOB concurrency: how many queue jobs run at once (worker only).
+      VIDEO_JOB_CONCURRENCY: "2"
+      VIDEO_JOB_TIMEOUT_MS: "300000"
       PREVIEW_DURATION_SECONDS: "6"
       PREVIEW_VARIANT_TRANSFORM: w_400,h_600,f_mp4,vc_h264,q_65,c_fill
       FFMPEG_X264_PRESET: superfast
@@ -42,8 +46,6 @@ services:
       - loki
     volumes:
       - ./src:/app/src
-      - ./test.html:/app/test.html:ro
-      - ./compare.html:/app/compare.html:ro
       - ./.env.development:/app/.env.development:ro
     command: node --watch src/index.js
     mem_reservation: 768m
@@ -67,7 +69,11 @@ services:
       S3_SECRET_KEY: minioadmin
       REDIS_URL: redis://redis:6379
       NODE_OPTIONS: --max-old-space-size=2048
-      VIDEO_PREPROCESS_CONCURRENCY: "4"
+      # TASK concurrency: ffmpeg encodes within one unit of work.
+      VIDEO_PREPROCESS_CONCURRENCY: "1"
+      # JOB concurrency: how many queue jobs run at once (worker only).
+      VIDEO_JOB_CONCURRENCY: "2"
+      VIDEO_JOB_TIMEOUT_MS: "300000"
       PREVIEW_DURATION_SECONDS: "6"
       PREVIEW_VARIANT_TRANSFORM: w_400,h_600,f_mp4,vc_h264,q_65,c_fill
       FFMPEG_X264_PRESET: superfast

@@ -45,19 +45,57 @@ function makeLogger() {
 }
 
 const logger = makeLogger();
+
+// JOB concurrency — how many jobs run at once. Deliberately a different key from
+// VIDEO_PREPROCESS_CONCURRENCY, which is the per-job TASK fan-out: one value
+// serving both meanings multiplied the live ffmpeg children (jobs x tasks)
+// instead of bounding them.
 const concurrency = Math.max(
   1,
-  Number.parseInt(process.env.VIDEO_PREPROCESS_CONCURRENCY || "4", 10) || 4,
+  Number.parseInt(process.env.VIDEO_JOB_CONCURRENCY || "2", 10) || 2,
 );
+
+// A job that never finishes would hold its slot, and its memory, forever — the
+// duration limit that used to bound this was dropped at upload. Set ABOVE the
+// per-ffmpeg timeout (VIDEO_FFMPEG_TIMEOUT_MS, 120s by default), which already
+// SIGKILLs its own child: by the time this fires, the child that caused it has
+// already been killed by its own timer, so the slot is released with nothing
+// left running.
+const JOB_TIMEOUT_MS = Math.max(
+  1000,
+  Number.parseInt(process.env.VIDEO_JOB_TIMEOUT_MS || "300000", 10) || 300000,
+);
+
+function withTimeout(promise, ms, originalKey) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Video job for ${originalKey} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 const worker = new Worker(
   QUEUE_NAME,
   async (job) => {
-    const { originalKey, relativePath, story } = job.data;
+    const { originalKey, relativePath, story, attribution } = job.data;
     logger.info({ originalKey, story }, "Processing video job");
     const end = jobDuration.startTimer();
     try {
-      await generatePolishedVariants(originalKey, relativePath, { story }, logger);
+      await withTimeout(
+        // `attribution` is absent for jobs enqueued by the delivery route and the
+        // backfill script, which have no ticket; those must still run.
+        generatePolishedVariants(
+          originalKey,
+          relativePath,
+          { story, attribution },
+          logger,
+        ),
+        JOB_TIMEOUT_MS,
+        originalKey,
+      );
       jobsProcessed.inc();
       logger.info({ originalKey }, "Video job complete");
     } catch (err) {

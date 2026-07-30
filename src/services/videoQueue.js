@@ -47,7 +47,21 @@ function getVideoQueue() {
   return queue;
 }
 
-async function enqueueVideoJob({ originalKey, relativePath, story }, logger) {
+/**
+ * Enqueue the heavy video work.
+ *
+ * `attribution` ({user_type, user_id, ticket_jti}) travels with the job so the
+ * worker can stamp the variants it writes: they are created after the request
+ * has ended, with no ticket in scope, and without this the attribution would
+ * cover originals only. Identifiers only — a failed job keeps its payload for a
+ * day, so contact details must not ride along; the upload log line already has
+ * them.
+ *
+ * Two other producers enqueue without a ticket (the delivery route on a cache
+ * miss, and the backfill script), so `attribution` is optional by design and the
+ * worker must run happily without it.
+ */
+async function enqueueVideoJob({ originalKey, relativePath, story, attribution }, logger) {
   const q = getVideoQueue();
   if (!q) {
     (logger || console).warn(
@@ -62,7 +76,12 @@ async function enqueueVideoJob({ originalKey, relativePath, story }, logger) {
     await Promise.race([
       q.add(
         "polish",
-        { originalKey, relativePath, story: story === true },
+        {
+          originalKey,
+          relativePath,
+          story: story === true,
+          attribution: attribution || null,
+        },
         buildJobOptions(originalKey),
       ),
       new Promise((_, reject) =>

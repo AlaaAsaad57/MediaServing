@@ -2,7 +2,7 @@
 ticket: gated-upload-auth
 title: Gated ticket-based upload authorization
 mode: standard           # single workflow form — no other modes (ADR-011)
-state: approved            # AUTHORITATIVE workflow state (see allowed values below)
+state: closed              # AUTHORITATIVE workflow state (see allowed values below)
 status: active           # orthogonal health flag: active | blocked
 owner: developer         # accountable role/person (em | developer | ai_agent | name)
 created_at: 2026-07-29   # YYYY-MM-DD
@@ -83,6 +83,35 @@ command appends one entry for the transition it performs.
   timestamp: 2026-07-29
 - state: approved
   event: plan-approved
+  by: reviewer
+  timestamp: 2026-07-29
+- state: implementation-in-progress
+  event: implementation-started
+  by: developer
+  timestamp: 2026-07-29
+- state: implemented
+  event: implementation-completed
+  by: developer
+  timestamp: 2026-07-29
+- state: implementation-in-progress
+  event: verification-failed
+  by: reviewer
+  timestamp: 2026-07-29
+  note: AC-8 (truncated over-cap upload) and AC-19 (500 instead of download)
+- state: implementation-in-progress
+  event: implementation-resumed
+  by: developer
+  timestamp: 2026-07-29
+- state: implemented
+  event: implementation-completed
+  by: developer
+  timestamp: 2026-07-29
+- state: verified
+  event: verification-passed
+  by: reviewer
+  timestamp: 2026-07-29
+- state: closed
+  event: ticket-closed
   by: reviewer
   timestamp: 2026-07-29
 ```
