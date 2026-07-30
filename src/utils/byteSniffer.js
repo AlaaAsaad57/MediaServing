@@ -190,7 +190,7 @@ const INLINE_SAFE_CONTENT_TYPES = new Set(
 // which asks `isInlineSafeContentType` about the stored type instead.
 const INLINE_SAFE_EXTENSIONS = new Set([
   "jpg", "jpeg", "jpe", "png", "gif", "webp", "avif",
-  "mp4", "m4v", "mov", "webm",
+  "mp4", "m4v", "mov", "webm","svg"
 ]);
 
 function isInlineSafeExtension(extension) {
