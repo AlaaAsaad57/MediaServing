@@ -11,8 +11,6 @@
     "migrate:full": "node src/scripts/migrate-cloudinary.js --limit 0",
     "preprocess-videos": "node src/scripts/preprocess-videos.js",
     "preprocess-videos:dry": "node src/scripts/preprocess-videos.js --dry-run",
-    "fetch-video": "node src/scripts/fetch-and-upload.js",
-    "fetch-video:story": "node src/scripts/fetch-and-upload.js --story --folder stories",
     "worker": "cross-env NODE_ENV=production node src/worker.js"
   },
   "dependencies": {

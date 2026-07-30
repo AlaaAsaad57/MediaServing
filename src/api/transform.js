@@ -1,4 +1,3 @@
-const path = require("path");
 const {
   parseChainedTransformations,
   resolveQAuto,
@@ -8,7 +7,12 @@ const {
   VALID_IMAGE_FORMATS,
 } = require("../utils/paramParser");
 const { generateDerivedKey } = require("../utils/hashGenerator");
-const { getObjectBuffer } = require("../storage/s3Client");
+const { getObjectBuffer, getObjectStream } = require("../storage/s3Client");
+const {
+  isInlineSafeContentType,
+  isInlineSafeExtension,
+} = require("../utils/byteSniffer");
+const { parseSingleRangeHeader } = require("../utils/rangeRequest");
 const {
   checkCache,
   getFromCache,
@@ -54,11 +58,18 @@ function setPendingCacheHeaders(reply) {
   );
 }
 
-function setImageDeliveryHeaders(reply) {
+// `nosniff` does not help when the declared type *is* text/html, so the
+// disposition is decided by the stored content type: recognised safe image and
+// video types render, everything else downloads. Without a content type the
+// caller is telling us it produced the bytes itself (a transform output), which
+// is inline-safe by construction.
+function setImageDeliveryHeaders(reply, contentType) {
   // Social preview crawlers can be strict about image response metadata.
   reply.header("X-Content-Type-Options", "nosniff");
   reply.header("Cross-Origin-Resource-Policy", "cross-origin");
-  reply.header("Content-Disposition", "inline");
+  const inline =
+    contentType === undefined || isInlineSafeContentType(contentType);
+  reply.header("Content-Disposition", inline ? "inline" : "attachment");
 }
 
 function isSocialCrawler(request) {
@@ -79,60 +90,6 @@ function resolveDefaultImageFormat(request) {
 
 function setVideoDeliveryHeaders(reply) {
   reply.header("Accept-Ranges", "bytes");
-}
-
-function parseSingleRangeHeader(rangeHeader, totalLength) {
-  if (!rangeHeader) return { kind: "none" };
-  if (typeof rangeHeader !== "string") return { kind: "invalid" };
-
-  const normalized = rangeHeader.trim().toLowerCase();
-  if (!normalized.startsWith("bytes=")) return { kind: "invalid" };
-
-  const rawValue = normalized.slice("bytes=".length);
-  if (!rawValue || rawValue.includes(",")) return { kind: "invalid" };
-
-  const [startRaw, endRaw] = rawValue.split("-");
-  if (startRaw === undefined || endRaw === undefined) {
-    return { kind: "invalid" };
-  }
-
-  let start;
-  let end;
-
-  if (startRaw === "") {
-    const suffixLength = Number.parseInt(endRaw, 10);
-    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
-      return { kind: "invalid" };
-    }
-
-    const effectiveLength = Math.min(suffixLength, totalLength);
-    start = Math.max(totalLength - effectiveLength, 0);
-    end = totalLength - 1;
-  } else {
-    start = Number.parseInt(startRaw, 10);
-    if (!Number.isFinite(start) || start < 0 || start >= totalLength) {
-      return { kind: "unsatisfiable" };
-    }
-
-    if (endRaw === "") {
-      end = totalLength - 1;
-    } else {
-      end = Number.parseInt(endRaw, 10);
-      if (!Number.isFinite(end) || end < start) {
-        return { kind: "invalid" };
-      }
-      end = Math.min(end, totalLength - 1);
-    }
-  }
-
-  return {
-    kind: "partial",
-    start,
-    end,
-    contentLength: end - start + 1,
-    headerValue: `bytes ${start}-${end}/${totalLength}`,
-    storageRange: `bytes=${start}-${end}`,
-  };
 }
 
 function applyVideoBodyHeaders(reply, contentType, variantName, cacheStatus) {
@@ -162,6 +119,35 @@ function sendVideoBuffer(
 
   reply.header("Content-Length", String(totalLength ?? buffer.length));
   return reply.send(buffer);
+}
+
+/**
+ * Stream a video body straight from storage to the client.
+ *
+ * The buffered sibling above loads the whole object into heap first. That was
+ * harmless while uploads were capped at 10 MB and is not at 100 MB: this route
+ * is unauthenticated and crawlers are exempt from rate limiting, so a handful of
+ * range-less requests for one warm object would be enough to exhaust the
+ * process. Piping keeps memory flat and lets backpressure park bytes in the
+ * socket rather than the heap.
+ */
+function sendVideoStream(
+  reply,
+  { stream, contentType, variantName, cacheStatus, range, totalLength },
+) {
+  applyVideoBodyHeaders(reply, contentType, variantName, cacheStatus);
+
+  if (range?.kind === "partial") {
+    reply.code(206);
+    reply.header("Content-Range", range.headerValue);
+    reply.header("Content-Length", String(range.contentLength));
+    return reply.send(stream);
+  }
+
+  if (totalLength != null) {
+    reply.header("Content-Length", String(totalLength));
+  }
+  return reply.send(stream);
 }
 
 /**
@@ -394,10 +380,19 @@ async function transformRoutes(fastify) {
   // ──────────────────────────────────────────────────────────────────────
 
   async function handleImage(request, reply, filePath, params, log) {
-    const isSvgFile = path.extname(filePath).toLowerCase() === ".svg";
-
-    // Explicit SVG output should return the original source untouched.
-    if (params.f === "svg" && isSvgFile) {
+    // The `f_svg` passthrough is gone: it served the stored bytes with the
+    // stored content type and `Content-Disposition: inline`, which is stored XSS
+    // on the media origin for a format the browser executes.
+    //
+    // Anything whose stored extension is not a recognised safe image or video —
+    // which, since the extension is byte-derived, means the bytes were never
+    // recognised — is handed straight to `sendOriginal`. That streams it back
+    // with a disposition taken from the STORED CONTENT TYPE, so it downloads
+    // instead of rendering. Without this the object would fall through to the
+    // transform path, where Sharp cannot decode it and the request 500s: safe,
+    // but not "served as a download".
+    const extension = filePath.split(".").pop();
+    if (!isInlineSafeExtension(extension)) {
       return sendOriginal(request, filePath, reply);
     }
 
@@ -582,7 +577,9 @@ async function transformRoutes(fastify) {
           return reply.send({ error: "Requested range not satisfiable" });
         }
 
-        const { buffer, contentType } = await getFromCache(derivedKey, {
+        // Streamed, not buffered: a warm 100 MB variant must not become 100 MB
+        // of heap per concurrent viewer.
+        const cached = await getObjectStream(derivedKey, {
           range: range.kind === "partial" ? range.storageRange : undefined,
         });
 
@@ -592,9 +589,9 @@ async function transformRoutes(fastify) {
           cacheStatus: "HIT",
           videoTarget: variantName,
         });
-        return sendVideoBuffer(reply, {
-          buffer,
-          contentType,
+        return sendVideoStream(reply, {
+          stream: cached.Body,
+          contentType: cached.ContentType,
           variantName,
           cacheStatus: "HIT",
           range,
@@ -655,12 +652,19 @@ async function transformRoutes(fastify) {
         reply.header("Content-Range", `bytes */${totalLength}`);
         return reply.send({ error: "Requested range not satisfiable" });
       }
-      const { buffer, contentType } = await getFromCache(fallbackKey, {
+      // Streamed for the same reason as the warm path above — this is the
+      // cold sibling, and both carry whole objects at the new cap.
+      const fallback = await getObjectStream(fallbackKey, {
         range: range.kind === "partial" ? range.storageRange : undefined,
       });
       stampLogExtra(request, { isVideo: true, filePath, cacheStatus: "PENDING", videoTarget: variantName });
-      return sendVideoBuffer(reply, {
-        buffer, contentType, variantName, cacheStatus: "PENDING", range, totalLength,
+      return sendVideoStream(reply, {
+        stream: fallback.Body,
+        contentType: fallback.ContentType,
+        variantName,
+        cacheStatus: "PENDING",
+        range,
+        totalLength,
       });
     }
 
@@ -862,9 +866,12 @@ async function transformRoutes(fastify) {
     const originalKey = `originals/${filePath}`;
     try {
       const { buffer, contentType } = await getObjectBuffer(originalKey);
-      reply.header("Content-Type", contentType || "application/octet-stream");
+      const storedType = contentType || "application/octet-stream";
+      reply.header("Content-Type", storedType);
       setMediaCacheHeaders(reply);
-      setImageDeliveryHeaders(reply);
+      // The stored type decides: an object whose bytes were never recognised
+      // downloads instead of rendering.
+      setImageDeliveryHeaders(reply, storedType);
       reply.header("X-Cache", "BYPASS");
       stampLogExtra(request, {
         isVideo: false,

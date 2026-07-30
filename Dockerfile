@@ -29,9 +29,9 @@ COPY --from=deps /app/node_modules ./node_modules
 # Keep package.json in runtime so yarn scripts (e.g. fetch-video:story) are usable via docker exec.
 COPY package.json ./
 
-# Copy application source and static HTML pages
+# Copy application source. The debug and statistics pages are gone — each
+# injected the API key into unauthenticated HTML.
 COPY src ./src
-COPY test.html compare.html stats.html ./
 
 EXPOSE 3000
 

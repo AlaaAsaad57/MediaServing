@@ -1,7 +1,13 @@
 const { putObject } = require("../storage/s3Client");
 const path = require("path");
-const mime = require("mime-types");
-const { isVideoFile } = require("../utils/paramParser");
+const { randomUUID } = require("crypto");
+const { ValidationError } = require("../utils/paramParser");
+const {
+  sniff,
+  isVideoKind,
+  isAudioKind,
+  SIGNATURE_BYTES,
+} = require("../utils/byteSniffer");
 const {
   getVariantUrls,
   snapshotCacheKey,
@@ -26,6 +32,12 @@ function maxBytesForType(resourceType) {
   return (resourceType === "video" ? VIDEO_MAX_MB : IMAGE_MAX_MB) * 1024 * 1024;
 }
 
+// Type detection for the size cap comes from the bytes too, so a video
+// mislabelled as an image cannot pick up the image cap.
+function isVideoBytes(buffer) {
+  return isVideoKind(sniff(buffer.subarray(0, SIGNATURE_BYTES)).kind);
+}
+
 function isTrueLike(value) {
   if (Array.isArray(value)) return isTrueLike(value[0]);
   if (value == null) return false;
@@ -33,13 +45,33 @@ function isTrueLike(value) {
   return raw === "true" || raw === "1" || raw === "yes";
 }
 
-function resolveExtension(filename, mimetype) {
-  const originalExt = path
-    .extname(filename || "")
-    .replace(".", "")
-    .toLowerCase();
-  const mimeExt = mime.extension(mimetype || "") || "";
-  return originalExt || mimeExt || "jpg";
+// A folder is a `/`-separated relative path of plain segments (`product`,
+// `product/descriptors`). Rejected: `.` or `..` segments, leading/trailing `/`,
+// empty segments, backslash, NUL, or any character outside [A-Za-z0-9._-].
+// Closes the unguarded interpolation this route used to do; with the
+// server-generated object name it leaves the folder as the only client-supplied
+// part of the key, and it can only name a directory inside `originals/`.
+const FOLDER_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+function validateFolder(folder) {
+  const raw = String(folder ?? "");
+  if (!raw) return "";
+  if (raw.includes("\\") || raw.includes("\0")) {
+    throw new ValidationError("Invalid folder");
+  }
+  if (raw.startsWith("/") || raw.endsWith("/")) {
+    throw new ValidationError("Invalid folder");
+  }
+  const segments = raw.split("/");
+  for (const segment of segments) {
+    if (!segment || segment === "." || segment === "..") {
+      throw new ValidationError("Invalid folder");
+    }
+    if (!FOLDER_SEGMENT.test(segment)) {
+      throw new ValidationError("Invalid folder");
+    }
+  }
+  return segments.join("/");
 }
 
 async function saveUploadedImage(
@@ -49,23 +81,36 @@ async function saveUploadedImage(
   folder,
   opts = {},
 ) {
-  const extension = resolveExtension(filename, mimetype);
-  const generatedFilename = `${Date.now()}${Math.floor(Math.random() * 1000)}.${extension}`;
-  const key = folder
-    ? `originals/${folder}/${generatedFilename}`
+  // The bytes decide what this object is — not the filename, not the declared
+  // mimetype. An unrecognised container still stores; it is simply served as a
+  // download rather than rendered.
+  const sniffed = sniff(buffer.subarray(0, SIGNATURE_BYTES));
+  const safeFolder = validateFolder(folder);
+  // randomUUID() rather than Date.now()+Math.random(): the old scheme collided
+  // for two uploads in the same millisecond and Math.random() is not a CSPRNG.
+  const generatedFilename = `${randomUUID()}.${sniffed.extension}`;
+  const key = safeFolder
+    ? `originals/${safeFolder}/${generatedFilename}`
     : `originals/${generatedFilename}`;
 
-  await putObject(key, buffer, mimetype);
+  await putObject(key, buffer, sniffed.contentType);
 
   const relativePath = key.replace(/^originals\//, "");
 
-  const isVideo = isVideoFile(filename, mimetype);
-  const resourceType = isVideo ? "video" : "image";
+  // Resource type also comes from the bytes: a mislabelled file must not be
+  // stored as one type and advertised as another.
+  const isVideo = isVideoKind(sniffed.kind);
+  // Audio has no transform pipeline and no delivery route of its own, so it is
+  // stored as-is and served by the originals download route. Without this branch
+  // it would fall through to the image one and an .m4a would be advertised as an
+  // image — precisely the mislabelling this block exists to prevent.
+  const isAudio = isAudioKind(sniffed.kind);
+  const resourceType = isVideo ? "video" : isAudio ? "file" : "image";
 
   const result = {
     key,
     size: buffer.length,
-    type: resourceType,
+    type: isAudio ? "audio" : resourceType,
     url:
       folder === "customers/profile"
         ? `/${relativePath}`
@@ -108,8 +153,8 @@ const bulkUploadRateLimit = {
 
 const STORY_VIDEO_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 
-async function validateStoryVideoConstraints(buffer, filename, mimetype) {
-  if (!isVideoFile(filename, mimetype)) {
+async function validateStoryVideoConstraints(buffer) {
+  if (!isVideoBytes(buffer)) {
     return { ok: true, durationSeconds: null };
   }
 
@@ -173,8 +218,8 @@ async function uploadRoutes(fastify) {
         return reply.code(400).send({ error: "Uploaded file is empty" });
       }
 
-      // Per-type size check after buffering.
-      const detectedType = isVideoFile(dataFilename, dataMimetype) ? "video" : "image";
+      // Per-type size check after buffering. The bytes decide the type.
+      const detectedType = isVideoBytes(buffer) ? "video" : "image";
       if (buffer.length > maxBytesForType(detectedType)) {
         return reply.code(413).send({
           error: `${detectedType} exceeds the ${detectedType === "video" ? VIDEO_MAX_MB : IMAGE_MAX_MB} MB limit`,
@@ -183,11 +228,7 @@ async function uploadRoutes(fastify) {
 
       let storyVideoDurationSeconds = null;
       if (storyMode) {
-        const validation = await validateStoryVideoConstraints(
-          buffer,
-          dataFilename,
-          dataMimetype,
-        );
+        const validation = await validateStoryVideoConstraints(buffer);
         if (!validation.ok) {
           return reply.code(400).send({ error: validation.error });
         }
@@ -316,8 +357,8 @@ async function uploadRoutes(fastify) {
       const fileBuffers = [];
 
       for (const { buffer, filename, mimetype } of collectedFiles) {
-        // Per-type size check after buffering.
-        const detectedType = isVideoFile(filename, mimetype) ? "video" : "image";
+        // Per-type size check after buffering. The bytes decide the type.
+        const detectedType = isVideoBytes(buffer) ? "video" : "image";
         if (buffer.length > maxBytesForType(detectedType)) {
           return reply.code(413).send({
             error: `${detectedType} exceeds the ${detectedType === "video" ? VIDEO_MAX_MB : IMAGE_MAX_MB} MB limit`,
@@ -326,11 +367,7 @@ async function uploadRoutes(fastify) {
 
         let storyVideoDurationSeconds = null;
         if (storyMode) {
-          const validation = await validateStoryVideoConstraints(
-            buffer,
-            filename,
-            mimetype,
-          );
+          const validation = await validateStoryVideoConstraints(buffer);
           if (!validation.ok) {
             return reply.code(400).send({ error: validation.error });
           }

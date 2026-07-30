@@ -505,10 +505,15 @@ async function processVideo(inputBuffer, params) {
   }
 }
 
-async function extractSnapshot(inputBuffer, timeSec = 1) {
-  const inPath = tmpPath("src");
-  await fs.writeFile(inPath, inputBuffer);
+// ── Path-accepting variants ─────────────────────────────────────────────────
+// ffmpeg and ffprobe work on files, so every buffer wrapper below already
+// writes its input to a temp file before doing anything. The gated upload path
+// already HAS the bytes on disk — it tees them there as they stream in — so
+// handing it a path skips building a 100 MB buffer only to write it straight
+// back out. The buffer signatures are unchanged and still used by the legacy
+// upload route and the worker.
 
+async function extractSnapshotFromPath(inPath, timeSec = 1) {
   try {
     const probeInfo = await probe(inPath);
     const duration = parseFloat(probeInfo?.format?.duration || "0");
@@ -517,11 +522,42 @@ async function extractSnapshot(inputBuffer, timeSec = 1) {
     const frameBuf = await extractFrame(inPath, seekTo);
     // Convert to webp for small size
     const output = await sharp(frameBuf).webp({ quality: 80 }).toBuffer();
-    await cleanup(inPath);
     return { buffer: output, contentType: "image/webp" };
   } catch (err) {
-    await cleanup(inPath);
     throw new Error(`Snapshot extraction failed: ${err.message}`);
+  }
+}
+
+async function extractRawFrameFromPath(inPath, timeSec = 0) {
+  try {
+    const probeInfo = await probe(inPath);
+    const duration = parseFloat(probeInfo?.format?.duration || "0");
+    const seekTo = Math.min(timeSec, Math.max(duration - 0.1, 0));
+    return await extractFrame(inPath, seekTo);
+  } catch (err) {
+    throw new Error(`Frame extraction failed: ${err.message}`);
+  }
+}
+
+async function probeDurationFromPath(inPath) {
+  const info = await probe(inPath);
+  return parseFloat(info?.format?.duration || "0") || 0;
+}
+
+async function probeMediaFromPath(inPath) {
+  const json = await probe(inPath);
+  return extractMediaInfo(json);
+}
+
+// ── Buffer wrappers (unchanged signatures) ──────────────────────────────────
+
+async function extractSnapshot(inputBuffer, timeSec = 1) {
+  const inPath = tmpPath("src");
+  await fs.writeFile(inPath, inputBuffer);
+  try {
+    return await extractSnapshotFromPath(inPath, timeSec);
+  } finally {
+    await cleanup(inPath);
   }
 }
 
@@ -533,17 +569,10 @@ async function extractSnapshot(inputBuffer, timeSec = 1) {
 async function extractRawFrame(inputBuffer, timeSec = 0) {
   const inPath = tmpPath("src");
   await fs.writeFile(inPath, inputBuffer);
-
   try {
-    const probeInfo = await probe(inPath);
-    const duration = parseFloat(probeInfo?.format?.duration || "0");
-    const seekTo = Math.min(timeSec, Math.max(duration - 0.1, 0));
-    const frameBuf = await extractFrame(inPath, seekTo);
+    return await extractRawFrameFromPath(inPath, timeSec);
+  } finally {
     await cleanup(inPath);
-    return frameBuf;
-  } catch (err) {
-    await cleanup(inPath);
-    throw new Error(`Frame extraction failed: ${err.message}`);
   }
 }
 
@@ -551,8 +580,7 @@ async function probeDuration(inputBuffer) {
   const inPath = tmpPath("src");
   await fs.writeFile(inPath, inputBuffer);
   try {
-    const info = await probe(inPath);
-    return parseFloat(info?.format?.duration || "0") || 0;
+    return await probeDurationFromPath(inPath);
   } finally {
     await cleanup(inPath);
   }
@@ -562,8 +590,7 @@ async function probeMedia(inputBuffer) {
   const inPath = tmpPath("src");
   await fs.writeFile(inPath, inputBuffer);
   try {
-    const json = await probe(inPath);
-    return extractMediaInfo(json);
+    return await probeMediaFromPath(inPath);
   } finally {
     await cleanup(inPath);
   }
@@ -576,4 +603,11 @@ module.exports = {
   extractSnapshot,
   extractRawFrame,
   probe,
+  // Path-accepting variants, for callers that already have the file on disk.
+  probeDurationFromPath,
+  probeMediaFromPath,
+  extractSnapshotFromPath,
+  extractRawFrameFromPath,
+  tmpPath,
+  cleanup,
 };

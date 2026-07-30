@@ -2,6 +2,12 @@ node_modules/
 .env
 .env.*
 plan.md
+# ...but the workflow's own plan files are part of the corpus, not scratch notes.
+!.claude/commands/plan.md
+!_specs/_templates/plan.md
+# A ticket's plan is workflow evidence: /publish-pr must be able to commit the
+# whole _specs/<slug>/ folder (PB-9). Without this the plan is silently dropped.
+!_specs/**/plan.md
 USAGE_IN_CLIENTS_SITE.tsx
 
 
@@ -10,3 +16,11 @@ Application Metrics Standard.md
 docs/شرح-المقاييس-بالعربي.md
 docs/تحليل-مقاييس-الإنتاج-الحية.md
 .superpowers/sdd/progress.md
+
+# Claude Code local settings (personal, may contain tokens — never commit)
+.claude/settings.local.json
+
+# Engineering Workflow v1 gate notifications.
+# Keep it local; never commit the secret. Copy .claude/notifications.example.json
+# to .claude/notifications.json and fill in botToken, or supply WF_TELEGRAM_* env.
+.claude/notifications.json

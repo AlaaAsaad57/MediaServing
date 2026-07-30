@@ -29,8 +29,19 @@ if (process.env.NODE_ENV !== "production") {
 
 const BUCKET = process.env.S3_BUCKET || "media";
 
-async function getObjectStream(key) {
-  const command = new GetObjectCommand({ Bucket: BUCKET, Key: key });
+/**
+ * Fetch an object as a stream, optionally a byte range.
+ *
+ * The range argument lets the delivery route serve partial content without
+ * pulling the whole object into memory first. Callers that pass no options get
+ * exactly the previous behaviour.
+ */
+async function getObjectStream(key, opts = {}) {
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ...(opts.range ? { Range: opts.range } : {}),
+  });
   const response = await s3.send(command);
   return response;
 }
@@ -64,15 +75,29 @@ async function getObjectMetadata(key) {
     contentLength: response.ContentLength,
     contentType: response.ContentType,
     etag: response.ETag,
+    // User metadata (`user-type`, `original-name`, …). S3 lowercases the keys.
+    // Added for the chat download route, which reads the original filename from
+    // it; existing callers destructure the fields above and are unaffected.
+    metadata: response.Metadata,
   };
 }
 
-async function putObject(key, buffer, contentType) {
+/**
+ * Write an object, optionally with S3 user metadata.
+ *
+ * `metadata` carries upload attribution (`user-type`, `user-id`, `ticket-jti`,
+ * `uploaded-at`) so a stored object stays traceable to a person for as long as
+ * it exists — logs expire, objects do not. Keys and values must be ASCII; the
+ * caller is responsible for that. Omitting the argument writes no metadata,
+ * which is exactly the previous behaviour.
+ */
+async function putObject(key, buffer, contentType, metadata) {
   const command = new PutObjectCommand({
     Bucket: BUCKET,
     Key: key,
     Body: buffer,
     ContentType: contentType,
+    ...(metadata ? { Metadata: metadata } : {}),
   });
   return s3.send(command);
 }
@@ -86,7 +111,7 @@ async function putObject(key, buffer, contentType) {
  * uploads such as Excel exports. On any stream/upload error the SDK aborts the
  * in-flight multipart upload, so no partial object is left behind.
  */
-async function uploadStream(key, body, contentType) {
+async function uploadStream(key, body, contentType, metadata) {
   const partSizeMb = Number.parseInt(process.env.S3_UPLOAD_PART_SIZE_MB || "8", 10);
   const upload = new Upload({
     client: s3,
@@ -95,6 +120,7 @@ async function uploadStream(key, body, contentType) {
       Key: key,
       Body: body,
       ContentType: contentType,
+      ...(metadata ? { Metadata: metadata } : {}),
     },
     queueSize: Number.parseInt(process.env.S3_UPLOAD_CONCURRENCY || "4", 10),
     partSize: Math.max(partSizeMb, 5) * 1024 * 1024, // S3 minimum part size is 5 MB

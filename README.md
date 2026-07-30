@@ -1,6 +1,6 @@
 # MediaServing
 
-A self-hosted, Cloudinary-like image processing and serving API. Upload images once, then request them at any size, format, or quality through a simple URL — the service processes and caches everything automatically.
+A self-hosted, Cloudinary-like media processing and serving API. Upload an image or a video once, then request it at any size, format, or quality through a simple URL — the service processes and caches everything automatically.
 
 ---
 
@@ -21,12 +21,18 @@ No third-party image services, no per-image fees, no data leaving your infrastru
 | Feature                   | Details                                                                      |
 | ------------------------- | ---------------------------------------------------------------------------- |
 | **Image upload**          | Single or bulk upload (JPEG, PNG, WebP, AVIF) via HTTP POST                  |
-| **On-the-fly transforms** | Resize, crop, convert format, adjust quality — all via URL parameters        |
+| **Video upload**          | Same endpoints; cheap poster/snapshot frames are made during the request, the heavier variants on a background worker |
+| **Video variants**        | `?target=` selects a preset — `snapshot`, `webp`, `preview`, `story`, `story-fallback`, or the full render |
+| **HLS stories**           | Multi-rendition vertical stories, playlists rewritten to serve segments back through the API |
+| **Excel upload**          | `POST /upload/excel` streams spreadsheets straight to storage, with magic-byte validation |
+| **On-the-fly transforms** | Resize, crop, convert format, adjust quality — all via URL parameters (images only; video ignores URL params) |
 | **Smart caching**         | Transformed results are stored and served without re-processing              |
+| **Range requests**        | `206 Partial Content` for video playback and seeking                         |
 | **Distributed locking**   | Prevents duplicate work when multiple requests arrive simultaneously         |
-| **API key auth**          | `POST /upload` and `POST /upload/bulk` require an `X-API-Key` — image serving is public |
+| **API key auth**          | The upload endpoints require an `X-API-Key` — all media serving is public     |
 | **Rate limiting**         | Per-key and per-IP limits protect the service from abuse                     |
 | **CORS support**          | Configurable allowed origins for browser-based clients                       |
+| **Observability**         | Structured JSON logs to Loki, Prometheus metrics on `/metrics`, a stats dashboard on `/stats` |
 | **Health check**          | `/health` endpoint — no auth required, useful for uptime monitoring          |
 
 ---
@@ -37,8 +43,11 @@ No third-party image services, no per-image fees, no data leaving your infrastru
 | -------------------- | ------------------------------------------------------- |
 | **Web framework**    | [Fastify](https://fastify.dev/)                         |
 | **Image processing** | [Sharp](https://sharp.pixelplumbing.com/)               |
+| **Video processing** | FFmpeg / ffprobe (must be on `PATH`, or set `FFMPEG_PATH` / `FFPROBE_PATH`) |
+| **Job queue**        | [BullMQ](https://docs.bullmq.io/) on Redis — heavy video variants run on a separate worker process (`npm run worker`) |
 | **Object storage**   | MinIO (local) / AWS S3 (production)                     |
 | **Cache / Locking**  | Redis (falls back to in-memory if Redis is unavailable) |
+| **Observability**    | Pino → Loki, `prom-client` metrics, Grafana             |
 | **Runtime**          | Node.js 18+                                             |
 
 ---
@@ -49,19 +58,27 @@ No third-party image services, no per-image fees, no data leaving your infrastru
 MediaServing/
 ├── src/
 │   ├── index.js                  # Entry point — starts the server
+│   ├── worker.js                 # BullMQ worker — heavy video variants
 │   ├── app.js                    # App factory — plugins, routes, error handler
 │   ├── api/
 │   │   ├── upload.js             # POST /upload, POST /upload/bulk
-│   │   └── transform.js          # GET /media/upload/:transformations/*
+│   │   ├── transform.js          # GET /:resourceType/upload/:transformations/*
+│   │   ├── files.js              # POST /upload/excel, GET /file/upload/*
+│   │   └── stats.js              # GET /stats + Loki/Grafana query proxy
 │   ├── config/
 │   │   └── env.js                # Environment variable loading
 │   ├── middleware/
 │   │   └── auth.js               # X-API-Key authentication hook
 │   ├── processors/
-│   │   └── imageProcessor.js     # Sharp image processing pipeline
+│   │   ├── imageProcessor.js     # Sharp image processing pipeline
+│   │   └── videoProcessor.js     # FFmpeg: variants, snapshots, HLS
 │   ├── services/
-│   │   ├── cacheService.js       # S3-based derived image cache
-│   │   └── lockService.js        # Redis SET NX EX lock + in-memory fallback
+│   │   ├── cacheService.js       # S3-based derived media cache
+│   │   ├── lockService.js        # Redis SET NX EX lock + in-memory fallback
+│   │   ├── videoQueue.js         # BullMQ queue — enqueues video jobs
+│   │   ├── videoJobs.js          # What the worker runs per job
+│   │   ├── videoPreprocessor.js  # full/preview/webp/snapshot presets
+│   │   └── storyVideoService.js  # story / story-fallback presets
 │   ├── storage/
 │   │   └── s3Client.js           # S3 client helpers (get, put, exists)
 │   └── utils/
@@ -81,7 +98,8 @@ MediaServing/
 
 ### Authentication
 
-**`POST /upload`** and **`POST /upload/bulk`** require authentication. Image serving and the health check are fully public.
+The upload endpoints require authentication. Media delivery and the health check
+are fully public.
 
 Protected endpoints require an `X-API-Key` header:
 
@@ -93,14 +111,16 @@ Missing or incorrect key on a protected endpoint → `401 Unauthorized`.
 
 **Public routes (no key needed):**
 
-- `GET /health`
-- `GET /media/upload/...` — all image serving and transform URLs
-- `GET /test`, `GET /test.html`
+- `GET /health`, `GET /metrics`
+- `GET /image/upload/...`, `GET /video/upload/...`, `GET /media/upload/...` — all delivery and transform URLs
+- `GET /file/upload/...` — spreadsheet download
+- `GET /test`, `GET /test.html`, `GET /compare`, `GET /compare.html`, `GET /stats`, `GET /stats.html`
 
 **Protected routes (API key required):**
 
 - `POST /upload`
 - `POST /upload/bulk`
+- `POST /upload/excel`
 
 ---
 
@@ -389,8 +409,12 @@ The derived key is a SHA256 hash of the original file path + all transformation 
 | Storage         | MinIO (Docker, local)   | AWS S3 (or any S3-compatible)              |
 | Redis           | Docker container        | Managed Redis (ElastiCache, Upstash, etc.) |
 | Start command   | `npm run dev`           | `npm start`                                |
+| Video worker    | `npm run worker`        | `npm run worker` (its own process/container) |
 | Env file loaded | `.env.development`      | `.env.production`                          |
 | Auto-restart    | Yes (Node.js `--watch`) | No                                         |
+
+Without the worker running, uploads still succeed and posters/snapshots still
+appear — but the polished video variants are never generated.
 
 ---
 
@@ -409,11 +433,10 @@ The derived key is a SHA256 hash of the original file path + all transformation 
 
 ## Scope
 
-This is an **images-only MVP**. The following are out of scope for the current version:
+Images, video (including HLS stories) and spreadsheet uploads are all supported.
+Still out of scope:
 
-- Video processing
 - Signed / expiring URLs
 - Multi-bucket support
-- CDN integration
-- User management / per-user API keys
-- Rate limiting dashboard
+- User management / per-user API keys — every caller shares one `API_KEY`
+- Byte quotas or per-upload accounting

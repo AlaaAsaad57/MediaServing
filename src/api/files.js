@@ -1,10 +1,12 @@
 const path = require("path");
+const { randomUUID } = require("crypto");
 const { Transform } = require("stream");
 const {
   uploadStream,
   getObjectStream,
 } = require("../storage/s3Client");
 const { ValidationError } = require("../utils/paramParser");
+const { detectKind, SIGNATURE_BYTES } = require("../utils/byteSniffer");
 
 // Accepted spreadsheet extensions and their canonical content types. The
 // extension is the first gate (browsers report inconsistent mimetypes for
@@ -28,8 +30,6 @@ const EXCEL_CONTAINER_BY_EXT = {
   xls: "ole2",
 };
 
-const SIGNATURE_BYTES = 8;
-
 class ExcelContentError extends Error {
   constructor() {
     super("File content does not match a valid Excel file");
@@ -38,33 +38,10 @@ class ExcelContentError extends Error {
   }
 }
 
-// Identify the binary container from the first bytes of the file.
-function detectContainerKind(head) {
-  if (
-    head.length >= 4 &&
-    head[0] === 0x50 &&
-    head[1] === 0x4b && // "PK"
-    ((head[2] === 0x03 && head[3] === 0x04) ||
-      (head[2] === 0x05 && head[3] === 0x06) || // empty archive
-      (head[2] === 0x07 && head[3] === 0x08)) // spanned archive
-  ) {
-    return "zip";
-  }
-  if (
-    head.length >= 8 &&
-    head[0] === 0xd0 &&
-    head[1] === 0xcf &&
-    head[2] === 0x11 &&
-    head[3] === 0xe0 &&
-    head[4] === 0xa1 &&
-    head[5] === 0xb1 &&
-    head[6] === 0x1a &&
-    head[7] === 0xe1
-  ) {
-    return "ole2";
-  }
-  return "unknown";
-}
+// Container identification now comes from the shared byte sniffer, which is the
+// same code the media upload paths use to decide what a file is. It returns null
+// for anything it does not recognise, where this route previously said
+// "unknown"; the comparison below treats both the same way.
 
 // A pass-through stream that verifies the leading magic bytes match
 // `expectedKind` before letting any data through, then forwards the rest
@@ -79,7 +56,7 @@ function createExcelContentValidator(expectedKind) {
       if (verified) return cb(null, chunk);
       head = head.length ? Buffer.concat([head, chunk]) : chunk;
       if (head.length < SIGNATURE_BYTES) return cb();
-      if (detectContainerKind(head) !== expectedKind) {
+      if (detectKind(head) !== expectedKind) {
         return cb(new ExcelContentError());
       }
       verified = true;
@@ -91,7 +68,7 @@ function createExcelContentValidator(expectedKind) {
       // Stream ended before a full signature (tiny/empty file). A real
       // spreadsheet is always larger than the signature, so this is a reject.
       if (verified) return cb();
-      if (detectContainerKind(head) !== expectedKind) {
+      if (detectKind(head) !== expectedKind) {
         return cb(new ExcelContentError());
       }
       this.push(head);
@@ -207,9 +184,7 @@ async function filesRoutes(fastify) {
 
         const ext = excelExtension(part.filename);
         const sanitizedFolder = sanitizeFolder(folder);
-        const generatedFilename = `${Date.now()}${Math.floor(
-          Math.random() * 1000,
-        )}.${ext}`;
+        const generatedFilename = `${randomUUID()}.${ext}`;
         const key = sanitizedFolder
           ? `originals/${sanitizedFolder}/${generatedFilename}`
           : `originals/${generatedFilename}`;

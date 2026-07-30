@@ -21,7 +21,11 @@ services:
     environment:
       NODE_ENV: production
       NODE_OPTIONS: --max-old-space-size=2048
-      VIDEO_PREPROCESS_CONCURRENCY: "4"
+      # TASK concurrency: ffmpeg encodes within one unit of work.
+      VIDEO_PREPROCESS_CONCURRENCY: "1"
+      # JOB concurrency: how many queue jobs run at once (worker only).
+      VIDEO_JOB_CONCURRENCY: "2"
+      VIDEO_JOB_TIMEOUT_MS: "300000"
       PREVIEW_DURATION_SECONDS: "6"
       PREVIEW_VARIANT_TRANSFORM: w_400,h_600,f_mp4,vc_h264,q_65,c_fill
       FFMPEG_X264_PRESET: veryfast
@@ -86,7 +90,11 @@ services:
     environment:
       NODE_ENV: production
       NODE_OPTIONS: --max-old-space-size=2048
-      VIDEO_PREPROCESS_CONCURRENCY: "4"
+      # TASK concurrency: ffmpeg encodes within one unit of work.
+      VIDEO_PREPROCESS_CONCURRENCY: "1"
+      # JOB concurrency: how many queue jobs run at once (worker only).
+      VIDEO_JOB_CONCURRENCY: "2"
+      VIDEO_JOB_TIMEOUT_MS: "300000"
       PREVIEW_DURATION_SECONDS: "6"
       PREVIEW_VARIANT_TRANSFORM: w_400,h_600,f_mp4,vc_h264,q_65,c_fill
       FFMPEG_X264_PRESET: veryfast
