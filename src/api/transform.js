@@ -81,6 +81,11 @@ function isSocialCrawler(request) {
   );
 }
 
+function isSvgPath(filePath) {
+  const ext = filePath.split(".").pop();
+  return ext != null && ext.toLowerCase() === "svg";
+}
+
 function resolveDefaultImageFormat(request) {
   if (isSocialCrawler(request)) {
     return (process.env.SOCIAL_IMAGE_DEFAULT_FORMAT || "jpg").toLowerCase();
@@ -375,31 +380,37 @@ async function transformRoutes(fastify) {
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  //  IMAGE — accept Cloudinary params but always force f=webp,
-  //          except explicit SVG passthrough requests (f_svg).
+  //  IMAGE — accept Cloudinary params. The output format is always a safe
+  //          raster image (WebP by default, JPEG for social crawlers).
+  //          SVG sources are an exception: they are rasterised to PNG so
+  //          they are never served back as executable markup.
   // ──────────────────────────────────────────────────────────────────────
 
   async function handleImage(request, reply, filePath, params, log) {
-    // The `f_svg` passthrough is gone: it served the stored bytes with the
-    // stored content type and `Content-Disposition: inline`, which is stored XSS
-    // on the media origin for a format the browser executes.
+    // SVG is not inline-safe by design, but rasterising it to PNG is safe.
+    // It is admitted through the transform path (see INLINE_SAFE_EXTENSIONS)
+    // and forced to PNG output below.
     //
-    // Anything whose stored extension is not a recognised safe image or video —
-    // which, since the extension is byte-derived, means the bytes were never
-    // recognised — is handed straight to `sendOriginal`. That streams it back
-    // with a disposition taken from the STORED CONTENT TYPE, so it downloads
-    // instead of rendering. Without this the object would fall through to the
-    // transform path, where Sharp cannot decode it and the request 500s: safe,
-    // but not "served as a download".
+    // Anything whose stored extension is not a recognised transformable image
+    // or video — which, since the extension is byte-derived, means the bytes
+    // were never recognised — is handed straight to `sendOriginal`. That
+    // streams it back with a disposition taken from the STORED CONTENT TYPE,
+    // so it downloads instead of rendering.
     const extension = filePath.split(".").pop();
-    if (!isInlineSafeExtension(extension)) {
+    const isSvg = isSvgPath(filePath);
+
+    if (!isSvg && !isInlineSafeExtension(extension)) {
       return sendOriginal(request, filePath, reply);
     }
 
     // If format is not explicitly requested, choose a crawler-safe default.
     // We keep WebP for normal browsers, and use JPEG for social bots.
+    // SVGs are always rasterised to PNG.
     if (typeof params.f !== "string" || !VALID_IMAGE_FORMATS.has(params.f)) {
       params.f = resolveDefaultImageFormat(request);
+    }
+    if (isSvg) {
+      params.f = "png";
     }
 
     // Resolve q_auto to a concrete integer for deterministic cache keys
@@ -894,8 +905,8 @@ async function transformRoutes(fastify) {
 
   // ── Route registration ─────────────────────────────────────────────────
   // Accepts Cloudinary-style URLs; transforms parsed but:
-  //   - Images: all params used EXCEPT format (always webp),
-  //             unless f_svg is requested for a .svg source (serve original)
+  //   - Images: all params used EXCEPT format, which defaults to WebP
+  //             (JPEG for social crawlers) and is forced to PNG for SVG sources.
   //   - Videos: all URL params ignored, only ?target= matters
 
   fastify.get("/:resourceType/upload/*", routeConfig, handleRequest);
