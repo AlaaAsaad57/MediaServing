@@ -8,13 +8,15 @@ Delivery URLs (`GET /image|video|file/upload/…`) do not change.
 ## What's different
 
 Uploading is now **two calls**: mint a short-lived permission with the user's
-access token, then spend it on the upload. The shared `X-API-Key` is gone.
+access token, then spend it on the upload with the same user's token. The shared `X-API-Key` is gone.
+
+The user token can be passed via **`Authorization: Bearer <token>`** header OR **`MARKET-TOKEN`** cookie.
 
 ```
-POST /gated/ticket        Authorization: Bearer <user access token>
+POST /gated/ticket        Authorization: Bearer <user access token>  (OR Cookie: MARKET-TOKEN=…)
   → { ticket, expires_in: 120, max_bytes }
 
-POST /gated/upload        X-Upload-Ticket: <ticket>
+POST /gated/upload        X-Upload-Ticket: <ticket>  AND  Authorization: Bearer <user access token> (OR Cookie: MARKET-TOKEN=…)
   → 201 { key, size, type, url, ... }
 ```
 

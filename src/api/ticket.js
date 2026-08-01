@@ -27,14 +27,10 @@ function toInt(value, fallback) {
 // Per-caller bucket. The token is one-per-caller by construction and cannot be
 // forged for someone else. The hash is a limiter key only — never logged,
 // stored, or returned.
+const { extractMarketToken } = require("../utils/tokenExtractor");
+
 function tokenBucket(token) {
   return `t:${createHash("sha256").update(token).digest("hex").slice(0, 32)}`;
-}
-
-function bearerToken(request) {
-  const header = request.headers.authorization || "";
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return match ? match[1].trim() : null;
 }
 
 // The socket's remote address, NOT the framework's proxy-aware address: a
@@ -54,7 +50,7 @@ const mintRateLimit = {
   max: toInt(process.env.TICKET_RATE_LIMIT_MAX, 30),
   timeWindow: toInt(process.env.TICKET_RATE_LIMIT_WINDOW_MS, 60_000),
   keyGenerator(request) {
-    const token = bearerToken(request);
+    const token = extractMarketToken(request);
     return token ? tokenBucket(token) : `p:${peerAddress(request)}`;
   },
 };
@@ -64,7 +60,7 @@ async function ticketRoutes(fastify) {
     "/gated/ticket",
     { config: { rateLimit: mintRateLimit } },
     async (request, reply) => {
-      const token = bearerToken(request);
+      const token = extractMarketToken(request);
       if (!token) {
         // No token at all is "not signed in", the same answer the gateway gives
         // for a bad one.
