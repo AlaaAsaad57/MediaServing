@@ -187,13 +187,21 @@ async function chatRoutes(fastify) {
           };
 
           return reply.code(201).send({
-            url: publicUrl(request, `/chat/file/${filename}`),
-            key,
-            filename,
-            originalName: part.filename ?? null,
-            contentType: sniffed.contentType,
-            size,
-            type: sniffed.media,
+            "isSuccessful": true,
+            "hasContent": true,
+            "code": 200,
+            "message": null,
+            "detailed_error": null,
+            "data": {
+                "file_path":publicUrl(request, `/chat/file/${filename}`),
+                 key,
+                filename,
+                originalName: part.filename ?? null,
+                contentType: sniffed.contentType,
+                size,
+                type: sniffed.media,
+            }
+
           });
         }
 
