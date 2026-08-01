@@ -205,10 +205,10 @@ async function chatRoutes(fastify) {
           });
         }
 
-        return reply.code(400).send({ error: "File is required" });
+        return reply.code(400).send({ message: "File is required", error: "File is required","code": 400,  "isSuccessful": false,});
       } catch (err) {
         if (isTooLargeError(err)) {
-          return reply.code(413).send({ error: "File exceeds the size limit" });
+          return reply.code(413).send({ message: "File exceeds the size limit", error: "File exceeds the size limit" ,"code": 413, "isSuccessful": false });
         }
         throw err;
       }
