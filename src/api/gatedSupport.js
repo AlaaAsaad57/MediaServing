@@ -16,9 +16,7 @@ const { once } = require("events");
 const { randomUUID } = require("crypto");
 
 const { uploadStream } = require("../storage/s3Client");
-const { peek, redeem, StoreUnavailableError } = require("../services/ticketService");
-const { fetchUserinfo } = require("../services/userinfoClient");
-const { extractMarketToken } = require("../utils/tokenExtractor");
+const { peek, redeem } = require("../services/ticketService");
 
 const TICKET_HEADER = "x-upload-ticket";
 
@@ -112,35 +110,13 @@ function forbidden(reply) {
 }
 
 /**
- * Take the ticket and consume it, verifying that the caller's market token matches
- * the ticket owner. Returns null when the caller gets a 403.
- * Throws StoreUnavailableError when the permission store or gateway is away (503).
+ * Take the ticket and consume it. Returns null when the caller gets a 403.
+ * Throws StoreUnavailableError when the permission store is away (503).
  */
 async function consumeTicket(request) {
   const token = request.headers[TICKET_HEADER];
   if (!token || Array.isArray(token)) return null;
-
-  const marketToken = extractMarketToken(request);
-  if (!marketToken) return null;
-
-  const identity = await fetchUserinfo(marketToken);
-  if (identity.status === "unauthenticated") return null;
-  if (identity.status !== "ok") {
-    throw new StoreUnavailableError(new Error("Identity service unavailable"));
-  }
-
-  const record = await redeem(token);
-  if (!record) return null;
-
-  // Verify that the ticket was minted by the same user attempting to upload
-  if (
-    String(identity.data.id) !== String(record.user_id) ||
-    String(identity.data.user_type) !== String(record.user_type)
-  ) {
-    return null;
-  }
-
-  return record;
+  return redeem(token);
 }
 
 // S3 user metadata. Account type and account id are BOTH required — the

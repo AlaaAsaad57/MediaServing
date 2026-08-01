@@ -16,8 +16,6 @@ function isPublicChatFilePath(pathname) {
   return pathname.startsWith("/chat/file/");
 }
 
-const { extractMarketToken } = require("../utils/tokenExtractor");
-
 async function authHook(request, reply) {
   const pathname = String(request.url || "").split("?")[0];
 
@@ -27,12 +25,11 @@ async function authHook(request, reply) {
     // Two cases, and the static API key is accepted in neither.
     //
     //   /gated/ticket  — carries a market access token, no ticket yet.
-    //   everything else under /gated/* — must carry an upload ticket and a market access token.
+    //   everything else under /gated/* — must carry an upload ticket.
     if (pathname === "/gated/ticket") return;
 
     const ticket = request.headers["x-upload-ticket"];
-    const marketToken = extractMarketToken(request);
-    if (!ticket || Array.isArray(ticket) || !marketToken) {
+    if (!ticket || Array.isArray(ticket)) {
       // Same uniform answer the routes give for a spent or expired ticket, so
       // this hook adds no way to tell the cases apart.
       return reply.code(403).send({ error: "Forbidden" });
