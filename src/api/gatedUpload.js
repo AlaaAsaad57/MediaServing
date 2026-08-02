@@ -378,7 +378,7 @@ async function gatedUploadRoutes(fastify) {
           };
 
           return reply.code(201).send({
-            key,
+            key: key.replace(/^originals\//, ""),
             filename: path.basename(key),
             originalName: part.filename,
             contentType,

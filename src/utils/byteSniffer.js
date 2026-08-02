@@ -18,9 +18,8 @@
 
 const { PassThrough } = require("stream");
 
-// Enough for every signature below. The longest check is the ISO-BMFF `ftyp`
-// box, whose brand sits at bytes 8..12.
-const SIGNATURE_BYTES = 16;
+// Enough for every signature below, including text/XML header inspections for SVG.
+const SIGNATURE_BYTES = 512;
 
 // kind -> how it is stored and whether it may render in the browser.
 const KINDS = {
@@ -29,6 +28,7 @@ const KINDS = {
   gif: { extension: "gif", contentType: "image/gif", media: "image", inlineSafe: true },
   webp: { extension: "webp", contentType: "image/webp", media: "image", inlineSafe: true },
   avif: { extension: "avif", contentType: "image/avif", media: "image", inlineSafe: true },
+  svg: { extension: "svg", contentType: "image/svg+xml", media: "image", inlineSafe: false },
   mp4: { extension: "mp4", contentType: "video/mp4", media: "video", inlineSafe: true },
   mov: { extension: "mov", contentType: "video/quicktime", media: "video", inlineSafe: true },
   webm: { extension: "webm", contentType: "video/webm", media: "video", inlineSafe: true },
@@ -86,6 +86,13 @@ const ISO_VIDEO_BRANDS = new Set([
 // a video player with a black frame instead of an audio control.
 const ISO_AUDIO_BRANDS = new Set(["m4a", "m4b", "m4p"]);
 
+function isSvgHeader(head) {
+  if (!Buffer.isBuffer(head) || head.length === 0) return false;
+  const str = head.toString("utf8").trim();
+  if (!str.toLowerCase().includes("<svg")) return false;
+  return /^(\ufeff|\s)*(<\?xml|<!--|<!doctype|<svg)/i.test(str);
+}
+
 /**
  * Identify the container from the leading bytes.
  * Returns a key of KINDS, or null when nothing matches.
@@ -139,6 +146,10 @@ function detectKind(head) {
     return "ole2";
   }
 
+  // SVG XML vector image. Recognised so stored object key carries .svg and Content-Type image/svg+xml.
+  // Raw downloads serve attachment (preventing XSS), while /image/upload/... rasterizes to PNG.
+  if (isSvgHeader(head)) return "svg";
+
   // An untagged MP3 opens on a bare MPEG frame sync — eleven set bits — rather
   // than a magic string. It is tested LAST because that is a two-byte pattern
   // and every real signature above must get its chance first.
@@ -146,8 +157,6 @@ function detectKind(head) {
     return "mp3";
   }
 
-  // SVG is deliberately absent: it is XML that a browser executes, so it is
-  // never a "recognised safe image" here (D21).
   return null;
 }
 

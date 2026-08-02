@@ -243,7 +243,7 @@ async function filesRoutes(fastify) {
 
       return reply.code(201).send({
         url,
-        key: uploaded.key,
+        key: uploaded.key.replace(/^originals\//, ""),
         filename: uploaded.filename,
         originalName: uploaded.originalName,
         contentType: uploaded.contentType,
