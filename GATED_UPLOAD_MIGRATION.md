@@ -1,129 +1,230 @@
-# Migrating to the gated upload API
+# Gated Upload API Migration Guide
 
-The legacy routes (`POST /upload`, `/upload/bulk`, `/upload/excel`) still work
-unchanged — move at your own pace. They go away in a later cutover ticket.
+Media uploads require a **two-step flow**:
+1. **Mint Ticket**: Request a short-lived permission ticket using the user's access token (`POST /gated/ticket`).
+2. **Upload File**: Upload the file(s) using the issued ticket (`X-Upload-Ticket: <ticket>`).
 
-Delivery URLs (`GET /image|video|file/upload/…`) do not change.
+---
 
-## What's different
+## 1. Step 1: Mint Ticket (`POST /gated/ticket`)
 
-Uploading is now **two calls**: mint a short-lived permission with the user's
-access token, then spend it on the upload. The shared `X-API-Key` is gone.
+### Required Headers
+- `Authorization: Bearer <user_access_token>`
+- `Content-Type: application/json`
 
+> **Note on `401 Unauthorized`**: If minting returns `401`, the user's access token is missing or expired. Handle `401` using your client application's own refresh-token / re-authentication flow (e.g., refresh access token or prompt user to log in). The media service has no knowledge of your client authentication flow.
+
+### Request Body (`application/json`)
+All body fields are optional:
+```json
+{
+  "folder": "product/descriptors",
+  "count": 1,
+  "story": false
+}
 ```
-POST /gated/ticket        Authorization: Bearer <user access token>
-  → { ticket, expires_in: 120, max_bytes }
+- `folder` *(string, optional, default `""`)*: Directory path of `/`-separated `[A-Za-z0-9._-]` segments. No leading/trailing `/`, no `.` or `..`.
+- `count` *(number, optional, default `1`, max `50`)*: Number of files expected (for bulk uploads).
+- `story` *(boolean, optional, default `false`)*: Set `true` for story uploads (caps max file size at 10 MB).
 
-POST /gated/upload        X-Upload-Ticket: <ticket>
-  → 201 { key, size, type, url, ... }
+### Response Shapes
+- **`201 Created`**:
+```json
+{
+  "ticket": "opaque_ticket_string",
+  "expires_in": 120,
+  "max_bytes": 104857600
+}
+```
+*(Note: `max_bytes` is `104857600` [100 MB] default, or `10485760` [10 MB] if `story: true`).*
+
+- **Errors**:
+  - `401`: Unauthorized (run client refresh/login flow).
+  - `403`: Forbidden (user account not authorized to upload).
+  - `400`: Bad Request (invalid `folder` or `count > 50`).
+  - `429` / `503`: Rate limit or service unavailable (retry with backoff).
+
+---
+
+## 2. Step 2: Upload Endpoints
+
+### Core Rules
+- **Header**: Pass `X-Upload-Ticket: <ticket>` on all gated upload calls.
+- **Content-Type**: Send `multipart/form-data`. (Do **not** set `Content-Type: application/json`; let the browser/client set the multipart boundary header automatically).
+- **Single-Use Ticket**: Tickets expire in **120 seconds** and are **single-use**. Every retry requires minting a new ticket.
+- **Bound Scope**: `folder`, `count`, and `story` settings are bound to the ticket at minting — upload body fields like `folder` are ignored.
+
+---
+
+### A. Single File Upload (`POST /gated/upload`)
+
+Upload a single image, video, audio, or document file.
+
+#### Headers & Body
+- Header: `X-Upload-Ticket: <ticket>`
+- Body: `multipart/form-data` with file field `file`.
+
+#### Response Shapes (`201 Created`)
+- **Standard File / Image / Audio**:
+```json
+{
+  "key": "originals/product/uuid.png",
+  "size": 123456,
+  "type": "image",
+  "url": "/image/upload/product/uuid.png"
+}
+```
+*(Note: `type` can be `"image"`, `"video"`, `"audio"`, or `"file"`).*
+
+- **Video Upload**:
+```json
+{
+  "key": "originals/product/uuid.mp4",
+  "size": 1048576,
+  "type": "video",
+  "url": "/video/upload/product/uuid.mp4",
+  "variants": {},
+  "durationSeconds": 45.2,
+  "story": { "enabled": true, "variants": {} }
+}
+```
+*(`story` present only when minted with `story: true`).*
+
+#### Errors
+- `400`: `{ "error": "File is required" }`
+- `403`: `{ "error": "Forbidden" }` (Ticket missing, expired, or already spent)
+- `413`: `{ "error": "File exceeds the size limit" }`
+- `503`: `{ "error": "Service unavailable" }`
+
+---
+
+### B. Bulk Image Upload (`POST /gated/upload/bulk`)
+
+Upload multiple images in one request (images only; videos are skipped).
+
+#### Headers & Body
+- Header: `X-Upload-Ticket: <ticket>`
+- Body: `multipart/form-data` containing `file` parts matching the minted `count`.
+
+#### Response Shapes (`201 Created`)
+- **Single Image Stored**:
+```json
+{
+  "url": "uuid.png"
+}
+```
+- **Multiple Images Stored**:
+```json
+{
+  "urls": [
+    "uuid1.png",
+    "uuid2.png"
+  ]
+}
+```
+- **With Skipped Videos**:
+```json
+{
+  "urls": [
+    "uuid1.png"
+  ],
+  "skipped": [
+    { "filename": "clip.mp4", "reason": "video_not_allowed" }
+  ]
+}
 ```
 
-The ticket carries the folder, size cap and file count, so the upload request no
-longer sends them. The object name and file type are decided by the server from
-the file's bytes — your filename and `Content-Type` are ignored.
+#### Errors
+- `400`: `{ "error": "At least one file is required" }`
+- `403`, `413`, `503`.
 
-## Route map
+---
 
-| Old | New |
-|---|---|
-| `POST /upload` | `POST /gated/upload` |
-| `POST /upload/bulk` | `POST /gated/upload/bulk` |
-| `POST /upload/excel` | `POST /gated/upload/excel` |
-| — | `POST /gated/chat/upload_file` (new: chat attachments) |
+### C. Excel Spreadsheet Upload (`POST /gated/upload/excel`)
 
-## Three rules to code against
+Upload Excel files (`.xlsx`, `.xls`, `.xlsm`, `.xlsb`). Max size limit: 512 MB.
 
-1. **Mint right before you upload.** The ticket lives 120 s.
-2. **A ticket is single-use, and a failed upload burns it.** Every retry needs a
-   fresh ticket — retry from the mint call.
-3. **One ticket per request.** A bulk upload is one request, so one ticket covers
-   all its files. Two single uploads need two tickets.
+#### Headers & Body
+- Header: `X-Upload-Ticket: <ticket>`
+- Body: `multipart/form-data` with `file` part.
 
-## Minting
-
-```js
-const res = await fetch(`${BASE}/gated/ticket`, {
-  method: "POST",
-  headers: {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({ folder: "product/descriptors", count: 1, story: false }),
-});
-const { ticket, max_bytes } = await res.json();
+#### Response Shapes (`201 Created`)
+```json
+{
+  "key": "product/uuid.xlsx",
+  "filename": "uuid.xlsx",
+  "originalName": "report.xlsx",
+  "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
 ```
 
-All body fields optional (`folder: ""`, `count: 1`, `story: false`).
+#### Errors
+- `400`: `{ "error": "Only Excel files are allowed (.xlsx, .xls, .xlsm, .xlsb)" }`
+- `403`, `413`, `503`.
 
-| Code | Do |
-|---|---|
-| `401` | send the user back through sign-in |
-| `403` | this account may not upload — surface it, don't retry |
-| `400` | bad `folder`, or `count` over 50 |
-| `429` / `503` | back off and retry |
+---
 
-Folder rules: `/`-separated segments of `[A-Za-z0-9._-]`. No `.`/`..`, no leading
-or trailing `/`. Rejected at mint time, so you find out before sending bytes.
+### D. Chat File Attachment (`POST /gated/chat/upload_file`)
 
-## Uploading
+Upload a single chat attachment (stored under `originals/chat/`). Max size limit: 25 MB.
 
-```js
-const body = new FormData();
-body.append("file", file);
+#### Headers & Body
+- Header: `X-Upload-Ticket: <ticket>`
+- Body: `multipart/form-data` with `file` part.
 
-const res = await fetch(`${BASE}/gated/upload`, {
-  method: "POST",
-  headers: { "X-Upload-Ticket": ticket },   // no Content-Type — the browser sets it
-  body,
-});
+#### Response Shapes (`201 Created`)
+```json
+{
+  "isSuccessful": true,
+  "hasContent": true,
+  "code": 200,
+  "message": null,
+  "detailed_error": null,
+  "data": {
+    "file_path": "https://media_server.ramaaz.dev/chat/file/uuid.pdf",
+    "key": "originals/chat/uuid.pdf",
+    "filename": "uuid.pdf",
+    "originalName": "document.pdf",
+    "contentType": "application/pdf",
+    "size": 123456,
+    "type": "file"
+  }
+}
 ```
 
-Drop the `folder` field — it's ignored. Response shape is the same as the legacy
-route: `{ key, size, type, url, variants?, story?, durationSeconds? }`.
+#### Errors
+- `400`: `{ "message": "File is required", "error": "File is required", "code": 400, "isSuccessful": false }`
+- `413`: `{ "message": "File exceeds the size limit", "error": "File exceeds the size limit", "code": 413, "isSuccessful": false }`
+- `403`: `{ "error": "Forbidden" }`
+- `503`: `{ "error": "Service unavailable" }`
 
-| Code | Meaning |
-|---|---|
-| `413` | too large. Nothing was stored |
-| `403` | ticket missing, expired or already spent — mint a new one, retry once |
-| `503` | service issue, back off |
+---
 
-## Per-route changes that affect your client
+## 3. Supported File Types & Key Constraints
 
-**`/gated/upload`**
-- Size cap is **100 MB** (10 MB for `story` tickets), up from 10 MB.
-- No video duration limit any more (was 60 s).
-- Audio is supported: `type: "audio"`.
+### Byte-Based Type Detection
+- File type and stored extension are derived **strictly from leading bytes (magic numbers)**. Client filenames and `Content-Type` headers are ignored.
+- **Unrecognized types are never rejected**; they store as `.bin` (`application/octet-stream`) and download safely.
 
-**`/gated/upload/bulk`**
-- **Images only.** Videos are rejected and listed in a `skipped` array; upload
-  them one at a time through `/gated/upload`.
-- Send exactly the number of files you asked for in `count`, or you get a `413`.
-- Response otherwise identical: `{ urls }` or `{ url }`, basenames only.
+### Type & Delivery Behavior
+- **Inline Browser Rendering**: `JPEG`, `PNG`, `GIF`, `WEBP`, `AVIF` (images), `MP4`, `MOV`, `WEBM` (video), `MP3`, `M4A`, `WAV`, `FLAC`, `OGG` (audio).
+- **Forced Downloads (Attachment)**: `SVG` (prevents XSS), `PDF`, Excel (`.xlsx`, `.xls`, `.xlsm`, `.xlsb`), and all unrecognized/binary files.
 
-**`/gated/upload/excel`**
-- Same four extensions, same 512 MB cap.
-- Response no longer has `url` — use `key`. The download route
-  `GET /file/upload/…` is unchanged.
+### Key Constraints Checklist
+- **Ticket TTL**: 120 seconds. Mint immediately before upload.
+- **Single-Use**: Failed or interrupted uploads consume the ticket. Every retry requires minting a new ticket.
+- **Folder Validation**: `/`-separated `[A-Za-z0-9._-]`. No leading/trailing `/`, `.`/`..` path traversal, backslashes, or NUL bytes.
+- **Bulk Route**: Images only (videos skipped/reported). Max 50 files per ticket.
+- **Excel Route**: Extension must match byte container (`zip` for `.xlsx`/`.xlsm`/`.xlsb`, `ole2` for `.xls`).
 
-**`/gated/chat/upload_file`** (new)
-- One file, no processing. Returns an **absolute** `url` to paste into a message.
-- Cap is **25 MB**, not `max_bytes`.
-- The ticket's `folder` is ignored — everything lands under `originals/chat/`.
-- Served by `GET /chat/file/*` (public, supports Range).
+---
 
-## File types
+## Quick Reference Summary
 
-The bytes decide, not the filename. Images, video and audio render in the
-browser; PDFs, spreadsheets and anything unrecognised download instead. SVG and
-HTML are deliberately never rendered. Nothing is rejected for its type — an
-unknown file uploads fine, it just downloads rather than displays.
-
-## Checklist
-
-- [ ] Get the user's access token where you previously used the API key
-- [ ] Add the mint call before each upload
-- [ ] Move `folder` / `story` / `count` into the mint body
-- [ ] Remove `X-API-Key`, add `X-Upload-Ticket`
-- [ ] Handle `401` (re-auth) / `403` (fresh ticket) / `413` / `503` separately
-- [ ] Bulk: split videos out
-- [ ] Excel: read `key` instead of `url`
+| Route | Auth Header | Body / Content-Type | Size / Notes |
+|---|---|---|---|
+| `POST /gated/ticket` | `Authorization: Bearer <token>` | `application/json` | Mints single-use ticket (TTL: 120s) |
+| `POST /gated/upload` | `X-Upload-Ticket: <ticket>` | `multipart/form-data` (`file`) | Max 100 MB (10 MB story) |
+| `POST /gated/upload/bulk` | `X-Upload-Ticket: <ticket>` | `multipart/form-data` (`file` x count) | Images only |
+| `POST /gated/upload/excel` | `X-Upload-Ticket: <ticket>` | `multipart/form-data` (`file`) | Max 512 MB (`.xlsx`, `.xls`, `.xlsm`, `.xlsb`) |
+| `POST /gated/chat/upload_file` | `X-Upload-Ticket: <ticket>` | `multipart/form-data` (`file`) | Max 25 MB (lands in `chat/`) |
