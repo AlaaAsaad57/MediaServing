@@ -1,6 +1,15 @@
 # Production deployment
 # Prerequisites: install the Loki Docker logging driver on the host before deploying.
 #   docker plugin install grafana/loki-docker-driver:latest --alias loki --grant-all-permissions
+#
+# The image is built and pushed by .github/workflows/deploy-production.yml — the
+# server pulls, it does not build. The `build:` blocks below are kept only so a
+# local `docker compose -f docker-compose.prod.yml build` still works for debugging.
+#
+#   deploy   (done by CI)  docker compose -f docker-compose.prod.yml pull && up -d
+#   rollback (manual)      IMAGE_TAG=sha-<short> docker compose -f docker-compose.prod.yml up -d
+#
+# Unset IMAGE_TAG means :latest, which always points at the newest CI build.
 
 x-loki-options: &loki-options
   loki-url: "${LOKI_URL:-http://127.0.0.1:3100/loki/api/v1/push}"
@@ -12,7 +21,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: media-serving:latest
+    image: ghcr.io/alaaasaad57998/mediaserving:${IMAGE_TAG:-latest}
     restart: unless-stopped
     stop_grace_period: 30s
 
@@ -80,7 +89,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: media-serving:latest
+    image: ghcr.io/alaaasaad57998/mediaserving:${IMAGE_TAG:-latest}
     command: node src/worker.js
     restart: unless-stopped
     stop_grace_period: 30s

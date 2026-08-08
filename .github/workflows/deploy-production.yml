@@ -1,0 +1,127 @@
+name: Deploy Production
+
+# Push to main -> build the runner image in CI, push it to GHCR, then SSH to the
+# server and restart the stack from the new image. The server no longer builds:
+# it only pulls. That keeps `pnpm install` + the sharp/musl compile off the box
+# that is simultaneously running ffmpeg encodes.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Two pushes in quick succession must not race each other onto the server.
+# cancel-in-progress stays false: a half-finished deploy is worse than a queued one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # GHCR requires an all-lowercase path; ${{ github.repository }} would carry the
+  # repo's original casing, so this is spelled out.
+  IMAGE: ghcr.io/alaaasaad57998/mediaserving
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Required for the type=gha cache backend below — older buildx releases
+      # cannot talk to GitHub's current cache service.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runner
+          # The Dockerfile installs @img/sharp-linux-x64-musl; pin the platform so
+          # an arm runner can never produce an image the x64 server cannot run.
+          platforms: linux/amd64
+          push: true
+          # :latest always tracks the newest successful build.
+          # :sha-<short> is the immutable handle used for rollback.
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+
+            # Keep the server's compose file in sync with the tag being deployed.
+            # --ff-only fails loudly if someone hand-edited a tracked file here,
+            # rather than silently deploying a mismatched compose.
+            # .env.production is gitignored, so it is never touched.
+            git pull --ff-only
+
+            # Pin this restart to the exact image this run built. Without it,
+            # compose falls back to :latest (see docker-compose.prod.yml).
+            export IMAGE_TAG=${{ needs.build.outputs.tag }}
+
+            docker compose -f docker-compose.prod.yml pull
+
+            # --remove-orphans drops containers that belong to THIS compose
+            # project but are no longer in docker-compose.prod.yml. Loki/Grafana/
+            # Redis run under a separate project, so they are unaffected — but if
+            # those stacks are ever merged into this file's project, this flag
+            # will delete anything removed from the file. Keep that in mind.
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+            # Health gate. The containers are already swapped by this point, so a
+            # failure here reports a bad deploy rather than preventing one —
+            # recover with:
+            #   IMAGE_TAG=sha-<previous> docker compose -f docker-compose.prod.yml up -d
+            # /health is allowlisted in middleware/auth.js, so no API key is needed.
+            healthy=0
+            for _ in $(seq 1 30); do
+              if curl -fsS -o /dev/null http://127.0.0.1:4001/health; then
+                healthy=1
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "$healthy" -ne 1 ]; then
+              echo "::error::/health did not return 200 within 60s — deploy is unhealthy"
+              docker compose -f docker-compose.prod.yml ps
+              docker compose -f docker-compose.prod.yml logs --tail=80 app
+              exit 1
+            fi
+
+            echo "healthy on $IMAGE_TAG"
+
+            # Dangling layers only; tagged images (including rollback targets) survive.
+            docker image prune -f

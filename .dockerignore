@@ -1,0 +1,30 @@
+# Build context trimming. The Dockerfile only needs package.json, pnpm-lock.yaml
+# and src/ — everything below is dead weight in the context (and node_modules
+# would shadow the musl-native sharp binaries pnpm installs inside the image).
+
+.git
+.github
+.gitignore
+
+node_modules
+**/node_modules
+
+# Local secrets — never reachable from a build stage.
+.env
+.env.*
+
+# Workflow / governance corpus, docs, and tooling: not part of the runtime.
+.claude
+.superpowers
+_specs
+docs
+observability
+scripts
+Tickets
+Ticket-Guide
+*.md
+*.txt
+
+# Compose files describe how to run the image, not what goes in it.
+docker-compose*.yml
+Dockerfile
