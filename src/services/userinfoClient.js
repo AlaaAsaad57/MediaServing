@@ -62,17 +62,6 @@ function isKnownUserType(value) {
 async function attempt(token) {
   const url = `${baseUrl()}/api/v1/userinfo`;
   let response;
-  // REMINDER TO REMOVE
-  return {status:'ok',data:
-    {
-          "id": 15832,
-        "user_type": "customer",
-        "is_allowed_to_upload_files": true,
-        "phone": "+9647701234567",
-        "email": "customer@example.com"
-    }
-    
-  };
   try {
     response = await fetch(url, {
       method: "GET",
