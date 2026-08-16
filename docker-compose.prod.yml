@@ -21,7 +21,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/alaaasaad57998/mediaserving:${IMAGE_TAG:-latest}
+    image: ghcr.io/alaaasaad57/mediaserving:${IMAGE_TAG:-latest}
     restart: unless-stopped
     stop_grace_period: 30s
 
@@ -89,7 +89,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/alaaasaad57998/mediaserving:${IMAGE_TAG:-latest}
+    image: ghcr.io/alaaasaad57/mediaserving:${IMAGE_TAG:-latest}
     command: node src/worker.js
     restart: unless-stopped
     stop_grace_period: 30s

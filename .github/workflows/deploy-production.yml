@@ -24,7 +24,7 @@ permissions:
 env:
   # GHCR requires an all-lowercase path; ${{ github.repository }} would carry the
   # repo's original casing, so this is spelled out.
-  IMAGE: ghcr.io/alaaasaad57998/mediaserving
+  IMAGE: ghcr.io/alaaasaad57/mediaserving
 
 jobs:
   build:
