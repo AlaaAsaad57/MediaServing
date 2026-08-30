@@ -262,6 +262,59 @@ GET /media/upload/w_800,h_600,f_webp,q_85/products/1712001234567.jpg
 GET /media/upload/products/1712001234567.jpg
 ```
 
+### Placeholder images on failure
+
+When the delivery route cannot produce an image, it sends a generated
+placeholder image instead of a JSON error body. The placeholder matches the
+requested size, so it fits the layout it was going to fill.
+
+**When it is used**
+
+| Case | Status | `X-Placeholder-Reason` |
+|---|---|---|
+| Original missing in S3 | `404` | `not-found` |
+| S3 or Redis unreachable | `500` | `storage-error` |
+| Sharp or FFmpeg failed on the original | `500` | `process-error` |
+
+Video: only `?target=snapshot` and `?target=webp` fall back to a placeholder.
+`full`, `preview`, `story` and `story-fallback` keep their JSON errors, because
+a `<video>` element cannot play a WebP. The lock-wait `503`, all `416` range
+errors, and `400` validation errors also keep their JSON bodies.
+
+**It is never cached.** A placeholder response keeps its real status code,
+sends `Cache-Control: no-store`, and is never written to the S3 `derived/`
+cache. So the moment the real image is available, the next request transforms
+it normally and caches that instead. Nothing needs purging.
+
+The status code is what makes this safe at the CDN. CloudFront caches an error
+status for about 10 seconds by default, while a `200` would follow the
+`CachingOptimized` policy and the origin's one-year `immutable` header.
+
+Placeholder responses carry `X-Placeholder: 1`, and their log line carries
+`placeholder: "yes"` plus `placeholder_reason` for Loki queries. They are
+labelled `transformed: bypass`, so they do not affect the warm/cold cache-ratio
+dashboards.
+
+**Size:** both `w` and `h` given uses them; one side gives a square; neither
+gives 600×600. Each side is clamped to 16–2000 px.
+
+**Environment variables** (every one is optional):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PLACEHOLDER_BG` | `#EDEEF0` | Panel colour |
+| `PLACEHOLDER_FG` | `#B4B9C2` | Glyph colour |
+| `PLACEHOLDER_DEFAULT_SIZE` | `600` | Side used when no `w`/`h` is given |
+| `PLACEHOLDER_MAX_SIZE` | `2000` | Upper clamp on either side |
+| `PLACEHOLDER_CACHE_CONTROL` | `no-store` | Cache header on placeholder responses |
+
+**Checks** (neither needs MinIO, Redis or a running server):
+
+```bash
+npm run check:placeholder         # renders samples, asserts output dimensions
+npm run check:placeholder-routes  # drives the routes with a stubbed S3 client
+```
+
 ---
 
 ## Transformation Parameters

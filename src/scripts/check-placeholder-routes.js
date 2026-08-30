@@ -284,6 +284,47 @@ async function main() {
   console.log("ok  a bad transform segment is not turned into a placeholder");
 
   await app.close();
+
+  // ── 11. The access log line carries the placeholder fields ──────────────
+  // A second app with logging on, with stdout captured, so the onResponse
+  // hook's JSON line can be inspected.
+  const logged = [];
+  const realWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => {
+    logged.push(String(chunk));
+    return realWrite(chunk, ...rest);
+  };
+
+  const loggingApp = buildApp();
+  await loggingApp.ready();
+  await loggingApp.inject({
+    method: "GET",
+    url: "/image/upload/w_64,h_64/log-check.jpg",
+  });
+  await loggingApp.close();
+  process.stdout.write = realWrite;
+
+  const line = logged
+    .flatMap((chunk) => chunk.split("\n"))
+    .map((raw) => {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    })
+    .find((entry) => entry && entry.file_path === "log-check.jpg");
+
+  assert.ok(line, "an access log line was emitted for the request");
+  assert.equal(line.component, "TransformRoute");
+  assert.equal(line.placeholder, "yes");
+  assert.equal(line.placeholder_reason, "not-found");
+  assert.equal(line.cache_status, "NOT_FOUND");
+  // "bypass" is intended: it keeps placeholder responses out of the Loki
+  // warm/cold cache-ratio queries, which filter transformed=~"warm|cold".
+  assert.equal(line.transformed, "bypass");
+  console.log("ok  access log carries placeholder / placeholder_reason");
+
   console.log("\nAll placeholder route checks passed.");
 
   // The video queue opens an ioredis connection that retries for ever, so it
