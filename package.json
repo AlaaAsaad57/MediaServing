@@ -11,7 +11,8 @@
     "migrate:full": "node src/scripts/migrate-cloudinary.js --limit 0",
     "preprocess-videos": "node src/scripts/preprocess-videos.js",
     "preprocess-videos:dry": "node src/scripts/preprocess-videos.js --dry-run",
-    "worker": "cross-env NODE_ENV=production node src/worker.js"
+    "worker": "cross-env NODE_ENV=production node src/worker.js",
+    "check:placeholder": "node src/scripts/check-placeholder.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1088.0",
