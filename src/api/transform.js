@@ -41,6 +41,10 @@ const {
   storyVideoParams,
 } = require("../services/storyVideoService");
 const { enqueueVideoJob } = require("../services/videoQueue");
+const {
+  resolvePlaceholderSize,
+  renderPlaceholder,
+} = require("../services/placeholderImage");
 
 function setMediaCacheHeaders(reply) {
   reply.header(
@@ -56,6 +60,38 @@ function setPendingCacheHeaders(reply) {
     process.env.MEDIA_PENDING_CACHE_CONTROL ||
       "public, max-age=5, must-revalidate",
   );
+}
+
+const PLACEHOLDER_REASONS = {
+  NOT_FOUND: "not-found",
+  STORAGE: "storage-error",
+  PROCESS: "process-error",
+};
+
+// Only still-image sources get a placeholder. `isInlineSafeExtension` also
+// admits mp4/mov/webm, and an image body in place of a missing video would be
+// wrong (design D14).
+const PLACEHOLDER_IMAGE_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "jpe",
+  "png",
+  "gif",
+  "webp",
+  "avif",
+  "svg",
+]);
+
+// Video targets that produce a still frame. Byte targets keep their JSON
+// errors: a <video> element cannot play a WebP (design D7).
+const PLACEHOLDER_VIDEO_TARGETS = new Set(["snapshot", "webp"]);
+
+function isPlaceholderImageExtension(filePath) {
+  const extension = String(filePath || "")
+    .split(".")
+    .pop();
+  if (!extension) return false;
+  return PLACEHOLDER_IMAGE_EXTENSIONS.has(extension.toLowerCase());
 }
 
 // `nosniff` does not help when the declared type *is* text/html, so the
@@ -312,6 +348,85 @@ function stampLogExtra(
   };
 }
 
+/**
+ * Send a size-matched placeholder image in place of a JSON error body.
+ *
+ * The response keeps its real status code, so a browser still renders the
+ * body inside an <img> while CloudFront files it under the short error TTL
+ * rather than the aggressive 200 path. It sends `no-store` and never calls
+ * `saveToCache`, so no layer can hold the placeholder once the real image
+ * comes back (design D1, D2, D3).
+ */
+async function sendPlaceholder(
+  request,
+  reply,
+  {
+    statusCode,
+    filePath,
+    params,
+    reason,
+    fallbackError,
+    isVideo = false,
+    videoTarget,
+  },
+) {
+  const cacheStatus =
+    reason === PLACEHOLDER_REASONS.NOT_FOUND ? "NOT_FOUND" : "ERROR";
+
+  stampLogExtra(request, { isVideo, filePath, cacheStatus, videoTarget });
+  request._logExtra.placeholder = "yes";
+  request._logExtra.placeholder_reason = reason;
+
+  try {
+    const { width, height } = resolvePlaceholderSize(params);
+    const requestedFormat =
+      typeof params?.f === "string" &&
+      VALID_IMAGE_FORMATS.has(params.f) &&
+      params.f !== "svg"
+        ? params.f
+        : resolveDefaultImageFormat(request);
+
+    const { buffer, contentType } = await renderPlaceholder({
+      width,
+      height,
+      format: requestedFormat,
+      quality: typeof params?.q === "number" ? params.q : undefined,
+    });
+
+    reply.header("Content-Type", contentType);
+    reply.header(
+      "Cache-Control",
+      process.env.PLACEHOLDER_CACHE_CONTROL || "no-store",
+    );
+    setImageDeliveryHeaders(reply);
+    reply.header("X-Placeholder", "1");
+    reply.header("X-Placeholder-Reason", reason);
+    reply.header("X-Cache", cacheStatus);
+    if (isVideo && videoTarget != null) {
+      reply.header("X-Video-Target", videoTarget);
+    }
+
+    return reply.code(statusCode).send(buffer);
+  } catch (err) {
+    // The placeholder is a nicety. It must never turn a clean 404 into a 500,
+    // so fall back to the JSON body this call site used to send (design D13).
+    request.log?.error(
+      {
+        service: "media-serving",
+        component: "TransformRoute",
+        env: process.env.NODE_ENV,
+        request_id: request.id,
+        file_path: filePath,
+        exception: err.constructor?.name || "Error",
+        error_message: err.message,
+      },
+      "Placeholder render failed, falling back to JSON error",
+    );
+    request._logExtra.placeholder = "failed";
+    return reply.code(statusCode).send({ error: fallbackError });
+  }
+}
+
 async function transformRoutes(fastify) {
   const routeConfig = {
     config: {
@@ -371,11 +486,51 @@ async function transformRoutes(fastify) {
     const isVideo =
       resourceType === "video" || (!resourceType && isVideoPath(filePath));
 
-    if (isVideo) {
-      // VIDEO: ignore all URL transform params, only use ?target= query param
-      await handleVideo(request, reply, filePath);
-    } else {
-      await handleImage(request, reply, filePath, params, request.log);
+    try {
+      if (isVideo) {
+        // VIDEO: ignore all URL transform params. `params` is passed only so a
+        // failed poster request can size its placeholder.
+        await handleVideo(request, reply, filePath, params);
+      } else {
+        await handleImage(request, reply, filePath, params, request.log);
+      }
+    } catch (err) {
+      // Last line of defence. The handlers cover their own S3 fetch and
+      // processing failures; what reaches here is infrastructure that failed
+      // before or around them — the cache-existence probe, the lock, a range
+      // metadata read.
+      if (reply.sent === true || reply.raw.headersSent) throw err;
+
+      const videoTarget = isVideo ? resolveVideoTarget(request) : undefined;
+      const eligible = isVideo
+        ? PLACEHOLDER_VIDEO_TARGETS.has(videoTarget)
+        : isPlaceholderImageExtension(filePath);
+
+      if (!eligible) throw err;
+
+      request.log.error(
+        {
+          service: "media-serving",
+          component: "TransformRoute",
+          env: process.env.NODE_ENV,
+          request_id: request.id,
+          file_path: filePath,
+          ...(isVideo && { video_target: videoTarget }),
+          exception: err.constructor?.name || "Error",
+          error_message: err.message,
+        },
+        "Media request failed before the handler could answer",
+      );
+
+      return sendPlaceholder(request, reply, {
+        statusCode: 500,
+        filePath,
+        params,
+        reason: PLACEHOLDER_REASONS.STORAGE,
+        fallbackError: "Internal server error",
+        isVideo,
+        videoTarget,
+      });
     }
   }
 
@@ -463,12 +618,13 @@ async function transformRoutes(fastify) {
         original = await getObjectBuffer(originalKey);
       } catch (err) {
         if (err.name === "NoSuchKey" || err.$metadata?.httpStatusCode === 404) {
-          stampLogExtra(request, {
-            isVideo: false,
+          return sendPlaceholder(request, reply, {
+            statusCode: 404,
             filePath,
-            cacheStatus: "NOT_FOUND",
+            params,
+            reason: PLACEHOLDER_REASONS.NOT_FOUND,
+            fallbackError: "Original file not found",
           });
-          return reply.code(404).send({ error: "Original file not found" });
         }
         log?.error(
           {
@@ -481,21 +637,38 @@ async function transformRoutes(fastify) {
           },
           "Failed to fetch original from S3",
         );
-        // Stamp before re-throwing so the onResponse hook logs this request
-        // with component="TransformRoute" (making it visible in the errors table).
-        stampLogExtra(request, {
-          isVideo: false,
+        return sendPlaceholder(request, reply, {
+          statusCode: 500,
           filePath,
-          cacheStatus: "ERROR",
+          params,
+          reason: PLACEHOLDER_REASONS.STORAGE,
+          fallbackError: "Internal server error",
         });
-        throw err;
       }
 
       const { buffer, contentType } = await processImage(
         original.buffer,
         params,
       );
-      await saveToCache(derivedKey, buffer, contentType);
+      // A failed cache *write* must not cost the caller their image: the
+      // transform already succeeded, and the outer catch now sends a
+      // placeholder (design D12).
+      try {
+        await saveToCache(derivedKey, buffer, contentType);
+      } catch (cacheErr) {
+        log?.error(
+          {
+            service: "media-serving",
+            component: "TransformRoute",
+            env: process.env.NODE_ENV,
+            file_path: filePath,
+            derived_key: derivedKey,
+            exception: cacheErr.constructor?.name || "Error",
+            error_message: cacheErr.message,
+          },
+          "Failed to write derived object to cache, serving uncached",
+        );
+      }
 
       reply.header("Content-Type", contentType);
       setMediaCacheHeaders(reply);
@@ -504,16 +677,26 @@ async function transformRoutes(fastify) {
       stampLogExtra(request, { isVideo: false, filePath, cacheStatus: "MISS" });
       return reply.send(buffer);
     } catch (err) {
-      // Catch-all for processImage / saveToCache / unexpected failures.
-      // If stampLogExtra was already called (e.g. for a handled 404), keep it.
-      if (!request._logExtra) {
-        stampLogExtra(request, {
-          isVideo: false,
-          filePath,
-          cacheStatus: "ERROR",
-        });
-      }
-      throw err;
+      // Catch-all for processImage / unexpected failures. saveToCache has its
+      // own handler above, so reaching here means no valid image exists.
+      log?.error(
+        {
+          service: "media-serving",
+          component: "TransformRoute",
+          env: process.env.NODE_ENV,
+          file_path: filePath,
+          exception: err.constructor?.name || "Error",
+          error_message: err.message,
+        },
+        "Image processing failed",
+      );
+      return sendPlaceholder(request, reply, {
+        statusCode: 500,
+        filePath,
+        params,
+        reason: PLACEHOLDER_REASONS.PROCESS,
+        fallbackError: "Internal server error",
+      });
     } finally {
       await releaseLock(derivedKey);
     }
@@ -523,7 +706,7 @@ async function transformRoutes(fastify) {
   //  VIDEO — ignore URL transforms, serve prebuilt variants via ?target=
   // ──────────────────────────────────────────────────────────────────────
 
-  async function handleVideo(request, reply, filePath) {
+  async function handleVideo(request, reply, filePath, params = {}) {
     const originalKey = `originals/${filePath}`;
     const target = resolveVideoTarget(request);
     const validTargets = [
@@ -751,15 +934,29 @@ async function transformRoutes(fastify) {
         const original = await getObjectBuffer(originalKey);
         originalBuffer = original.buffer;
       } catch (err) {
+        const eligible = PLACEHOLDER_VIDEO_TARGETS.has(variantName);
+
         if (err.name === "NoSuchKey" || err.$metadata?.httpStatusCode === 404) {
-          stampLogExtra(request, {
-            isVideo: true,
+          if (!eligible) {
+            stampLogExtra(request, {
+              isVideo: true,
+              filePath,
+              cacheStatus: "NOT_FOUND",
+              videoTarget: variantName,
+            });
+            return reply.code(404).send({ error: "Original file not found" });
+          }
+          return sendPlaceholder(request, reply, {
+            statusCode: 404,
             filePath,
-            cacheStatus: "NOT_FOUND",
+            params,
+            reason: PLACEHOLDER_REASONS.NOT_FOUND,
+            fallbackError: "Original file not found",
+            isVideo: true,
             videoTarget: variantName,
           });
-          return reply.code(404).send({ error: "Original file not found" });
         }
+
         request.log.error(
           {
             service: "media-serving",
@@ -772,15 +969,29 @@ async function transformRoutes(fastify) {
             error_message: err.message,
           },
           "Failed to fetch video original from S3",
-        ); // Stamp before re-throwing so the onResponse hook logs this request
-        // with component="TransformRoute" (visible in the errors table).
-        stampLogExtra(request, {
-          isVideo: true,
+        );
+
+        if (!eligible) {
+          // Stamp before re-throwing so the onResponse hook logs this request
+          // with component="TransformRoute" (visible in the errors table).
+          stampLogExtra(request, {
+            isVideo: true,
+            filePath,
+            cacheStatus: "ERROR",
+            videoTarget: variantName,
+          });
+          throw err;
+        }
+
+        return sendPlaceholder(request, reply, {
+          statusCode: 500,
           filePath,
-          cacheStatus: "ERROR",
+          params,
+          reason: PLACEHOLDER_REASONS.STORAGE,
+          fallbackError: "Internal server error",
+          isVideo: true,
           videoTarget: variantName,
         });
-        throw err;
       }
 
       // ── 4. Process the requested variant ─────────────────────────────
@@ -805,7 +1016,26 @@ async function transformRoutes(fastify) {
         ));
       }
 
-      await saveToCache(derivedKey, buffer, contentType);
+      // Same reason as the image path: a failed cache write must not cost the
+      // caller a poster that was produced successfully (design D12).
+      try {
+        await saveToCache(derivedKey, buffer, contentType);
+      } catch (cacheErr) {
+        request.log.error(
+          {
+            service: "media-serving",
+            component: "TransformRoute",
+            env: process.env.NODE_ENV,
+            request_id: request.id,
+            file_path: filePath,
+            video_target: variantName,
+            derived_key: derivedKey,
+            exception: cacheErr.constructor?.name || "Error",
+            error_message: cacheErr.message,
+          },
+          "Failed to write derived video object to cache, serving uncached",
+        );
+      }
 
       if (allowsRange) {
         const range = parseSingleRangeHeader(
@@ -853,7 +1083,33 @@ async function transformRoutes(fastify) {
       });
       return reply.send(buffer);
     } catch (err) {
-      // Catch-all for processVideo / saveToCache / unexpected failures.
+      // Catch-all for processVideo / unexpected failures. saveToCache has its
+      // own handler above.
+      if (PLACEHOLDER_VIDEO_TARGETS.has(variantName)) {
+        request.log.error(
+          {
+            service: "media-serving",
+            component: "TransformRoute",
+            env: process.env.NODE_ENV,
+            request_id: request.id,
+            file_path: filePath,
+            video_target: variantName,
+            exception: err.constructor?.name || "Error",
+            error_message: err.message,
+          },
+          "Video poster processing failed",
+        );
+        return sendPlaceholder(request, reply, {
+          statusCode: 500,
+          filePath,
+          params,
+          reason: PLACEHOLDER_REASONS.PROCESS,
+          fallbackError: "Internal server error",
+          isVideo: true,
+          videoTarget: variantName,
+        });
+      }
+
       // If stampLogExtra was already called (e.g. for a handled 404), keep it.
       if (!request._logExtra) {
         stampLogExtra(request, {
