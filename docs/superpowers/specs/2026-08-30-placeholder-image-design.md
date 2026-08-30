@@ -31,16 +31,34 @@ Three caches sit between the processor and the user. Each needs its own answer.
 2. **`Cache-Control` header.** This is the real danger. `setMediaCacheHeaders`
    sends `public, max-age=31536000, immutable`. A placeholder sent with that
    header is pinned in every browser and in the CDN for a year.
-3. **CloudFront.** The distribution uses the managed `CachingOptimized` policy
-   (`CLOUDFRONT_CDN_ROLLOUT.md`). That policy obeys the origin `Cache-Control`
-   on a `200`. Error statuses use a separate, short error-caching TTL of about
-   10 seconds.
+3. **The CDN.** Corrected 2026-08-30: the live CDN is **Cloudflare**, not
+   CloudFront. `CLOUDFRONT_CDN_ROLLOUT.md` in this repo describes a plan that
+   was not the one adopted. The real config is the Terraform in the sibling
+   `TrydosApp/cf-worker/infra/cache.tf`, on zone `ramaaz.dev`, hostname
+   `media.ramaaz.dev`. Two of its rules cover our paths:
+
+   | Rule | Matches | Edge TTL |
+   |---|---|---|
+   | `media_reads_no_query` | `/image/upload/*` | `respect_origin` |
+   | `media_reads_video_target` | `/video/upload/*`, `/media/upload/*` | `respect_origin` |
+
+   `respect_origin` means Cloudflare obeys the origin `Cache-Control`, so
+   `no-store` keeps the placeholder out of the edge cache. The setting that
+   would break this is `edge_ttl.mode = "override_origin"`, which ignores
+   `Cache-Control` entirely — it must never be set on those two rules.
+   `cache = true` on rule 1 sets cache *eligibility* (it overrides Cloudflare's
+   file-extension list), not TTL, so it does not defeat `no-store`.
+
+   Both rules also set `serve_stale.disable_stale_while_updating = false`. On a
+   storage outage Cloudflare serves the last good copy, so the `500` placeholder
+   never reaches a user whose edge already holds that image. The placeholder is
+   for genuinely missing files and cold URLs.
 
 ## Decisions
 
 | ID | Decision | Reason |
 |---|---|---|
-| D1 | The placeholder response **keeps the real status code** (`404` / `500`). Only the body changes, from JSON to image bytes. | A browser draws an `<img>` body even on an error status. Keeping the status puts the response under CloudFront's short error TTL instead of the aggressive `200` path, and Loki dashboards keep counting real failures. |
+| D1 | The placeholder response **keeps the real status code** (`404` / `500`). Only the body changes, from JSON to image bytes. | A browser draws an `<img>` body even on an error status. Loki dashboards keep counting real failures, and a `200` is the status every cache treats most aggressively. (The original reason given here was CloudFront's short error TTL. That was wrong about the CDN — see the corrected note above — but the decision stands on the reasons remaining.) |
 | D2 | Placeholder responses send `Cache-Control: no-store`, never `setMediaCacheHeaders`. | Stops browser and CDN caching at the source, independent of D1. |
 | D3 | `sendPlaceholder` never calls `saveToCache`. | Keeps the S3 `derived/` layer clean by construction, not by convention. |
 | D4 | Triggers: missing original, processing failure, storage failure. | These three are what a user sees as a broken image. |
@@ -140,7 +158,7 @@ When the real image comes back, nothing needs purging:
 
 1. The failing request wrote no `derived/` object (D3).
 2. The browser and the CDN hold nothing, because of `no-store` (D2) plus the
-   short CloudFront error TTL (D1).
+   Cloudflare cache rules resolving `edge_ttl` to `respect_origin` (D1).
 3. The next request is a normal cache `MISS`, transforms, and calls
    `saveToCache`. From then on it is a `HIT`.
 
@@ -169,3 +187,10 @@ live checks.
    failing request.
 4. Regression: a normal transform still returns `immutable`; a video
    `?target=full` still answers a Range request with `206`.
+5. **Open, not yet verified:** the `ramaaz.dev` zone carries
+   `browser_cache_ttl = 14400` as a dashboard setting, unmanaged by Terraform.
+   Confirm it does not rewrite the placeholder's `no-store` for browsers:
+   `curl -sI https://media.ramaaz.dev/image/upload/w_300,h_200/definitely-not-here.jpg`
+   must show `cache-control: no-store` and a `cf-cache-status` that is not
+   `HIT`/`MISS`. If it rewrites the header, set Browser Cache TTL to
+   "Respect Existing Headers".

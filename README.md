@@ -286,9 +286,15 @@ sends `Cache-Control: no-store`, and is never written to the S3 `derived/`
 cache. So the moment the real image is available, the next request transforms
 it normally and caches that instead. Nothing needs purging.
 
-The status code is what makes this safe at the CDN. CloudFront caches an error
-status for about 10 seconds by default, while a `200` would follow the
-`CachingOptimized` policy and the origin's one-year `immutable` header.
+**At the CDN.** The live CDN is Cloudflare (`media.ramaaz.dev`), configured by
+`cache.tf` in the sibling `cf-worker` repo. The two cache rules that cover
+`/image/upload/*` and `/video/upload/*` set `edge_ttl = respect_origin`, so
+Cloudflare obeys the `no-store` above and does not store the placeholder. Never
+switch those rules to `override_origin` — that ignores `Cache-Control` and would
+cache the placeholder.
+
+Ignore `CLOUDFRONT_CDN_ROLLOUT.md` in this repo when reasoning about caching. It
+describes a plan that was not adopted.
 
 Placeholder responses carry `X-Placeholder: 1`, and their log line carries
 `placeholder: "yes"` plus `placeholder_reason` for Loki queries. They are
