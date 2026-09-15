@@ -13,9 +13,19 @@ function createRedisClient() {
   const redisUrl = (process.env.REDIS_URL || "").trim();
   const commonOptions = {
     maxRetriesPerRequest: 1,
+    // ALWAYS return a number. ioredis reads a non-number as "stop reconnecting
+    // permanently" — it sets the client status to `end` and flushes the command
+    // queue (ioredis built/redis/event_handler.js). Nothing here ever calls
+    // connect() a second time, so the old `return null` after 3 tries turned one
+    // brief Redis outage into a dead client for the life of the process: every
+    // later command rejected with "Connection is closed.", /gated/* answered 503
+    // forever, and only a container restart cleared it.
+    //
+    // maxRetriesPerRequest stays at 1, so during a real outage a command still
+    // fails in well under a second — the routes keep failing fast (503) instead
+    // of hanging. This only governs whether the client ever comes back.
     retryStrategy(times) {
-      if (times > 3) return null;
-      return Math.min(times * 200, 2000);
+      return Math.min(times * 200, 5000);
     },
     lazyConnect: true,
   };
@@ -43,6 +53,15 @@ function initRedis() {
 
     redis.on("error", () => {
       redisAvailable = false;
+    });
+
+    // The flag must be able to come BACK. `error` clears it, and the connect()
+    // below only ever runs once, so without this listener a single error left
+    // locking in the in-memory fallback for the life of the process even after
+    // Redis returned — silently, and wrongly the moment a second instance runs.
+    // ioredis emits `ready` on every successful (re)connection.
+    redis.on("ready", () => {
+      redisAvailable = true;
     });
 
     redis
