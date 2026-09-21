@@ -263,7 +263,21 @@ async function chatRoutes(fastify) {
       // from the bytes at upload. So an image, a video or an audio file renders
       // or plays, and anything else — including bytes that were never
       // recognised — downloads, whatever it happens to be named.
-      const inline = isInlineSafeContentType(contentType);
+      //
+      // `?download=1` overrides that and forces an attachment. The chat needs
+      // it for a video the viewer's browser cannot decode: an iPhone HEVC .mov
+      // is stored as video/quicktime and served inline, which is right for the
+      // people who can play it and a dead end for everyone else. The client
+      // cannot solve this on its own — the `download` attribute on a link is
+      // ignored cross-origin, and this service is a different origin from the
+      // storefront.
+      //
+      // Safe to take from the query without any check: the flag can only ever
+      // make the response more conservative. It turns inline into attachment
+      // and never the other way round, so it cannot be used to get something
+      // rendered in the page that would not have been.
+      const wantsDownload = String(request.query?.download || "") === "1";
+      const inline = !wantsDownload && isInlineSafeContentType(contentType);
       const downloadName =
         object.metadata?.["original-name"] || path.basename(relativePath);
 
@@ -306,6 +320,10 @@ async function chatRoutes(fastify) {
         resource_type: "chat_file",
         s3_key: key,
         range: range.kind,
+        // Worth counting: a rising share means more senders are uploading video
+        // the viewers' browsers cannot decode, which is the case transcoding
+        // would fix.
+        forced_download: wantsDownload,
       };
 
       // Streamed, never buffered: a warm attachment must not become its own
