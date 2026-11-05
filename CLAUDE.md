@@ -48,6 +48,10 @@ npm run migrate:full # --limit 0 (unlimited)
 npm run preprocess-videos
 npm run preprocess-videos:dry
 
+# Backfill the tiny w_24/f_webp/q_25 copy for already-uploaded images
+npm run preprocess-images
+npm run preprocess-images:dry
+
 # Fetch a remote video and upload it (optionally as a story)
 npm run fetch-video
 npm run fetch-video:story
@@ -74,7 +78,7 @@ There is **no test runner, linter, or formatter** configured. `ffmpeg`/`ffprobe`
 
 ### Upload splits video work: cheap parts inline, heavy parts on a worker
 
-`POST /upload` and `POST /upload/bulk` (`upload.js`) stream multipart parts, collecting all `field` parts first so `folder` is available regardless of part order. For images, upload just stores the original. For **videos** (`upload.js:207-254`), after storing: `probeMedia` rejects an unreadable file (400) or one over `MAX_VIDEO_DURATION_SECONDS` (400); then the **snapshot and webp poster are generated inline** because image targets need them immediately; then an **instant variant** is generated inline *only* if `isWebPlayable` says the source won't play as-is. Poster/instant failures are logged, not fatal. Finally the **heavy polished variants are enqueued** (`enqueueVideoJob`) and the request returns without waiting.
+`POST /upload` and `POST /upload/bulk` (`upload.js`) stream multipart parts, collecting all `field` parts first so `folder` is available regardless of part order. For images, upload stores the original and then makes the tiny `w_24/f_webp/q_25` copy the store shows while a photo loads (`services/tinyPreview.js`; a failure is logged, not fatal). For **videos** (`upload.js:207-254`), after storing: `probeMedia` rejects an unreadable file (400) or one over `MAX_VIDEO_DURATION_SECONDS` (400); then the **snapshot and webp poster are generated inline** because image targets need them immediately; then an **instant variant** is generated inline *only* if `isWebPlayable` says the source won't play as-is. Poster/instant failures are logged, not fatal. Finally the **heavy polished variants are enqueued** (`enqueueVideoJob`) and the request returns without waiting.
 
 The queue is BullMQ on Redis (`services/videoQueue.js`), consumed by a **separate process** — `npm run worker` → `src/worker.js` → `services/videoJobs.js`. Jobs dedupe on `jobId: originalKey`, retry `VIDEO_JOB_ATTEMPTS` (3) with exponential backoff, and are dropped on success (`removeOnComplete: true`) or kept 24 h on failure. If the worker isn't running, uploads still succeed and posters appear — the polished variants simply never exist.
 

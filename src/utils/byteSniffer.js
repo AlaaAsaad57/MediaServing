@@ -198,7 +198,7 @@ const INLINE_SAFE_CONTENT_TYPES = new Set(
 // Sharp, which cannot decode it and 500s. Audio is served by the chat route,
 // which asks `isInlineSafeContentType` about the stored type instead.
 const INLINE_SAFE_EXTENSIONS = new Set([
-  "jpg", "jpeg", "jpe", "png", "gif", "webp", "avif",
+  "jpg", "jpeg", "jpe", "jfif", "png", "gif", "webp", "avif",
   "mp4", "m4v", "mov", "webm","svg"
 ]);
 

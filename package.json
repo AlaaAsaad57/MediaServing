@@ -11,6 +11,8 @@
     "migrate:full": "node src/scripts/migrate-cloudinary.js --limit 0",
     "preprocess-videos": "node src/scripts/preprocess-videos.js",
     "preprocess-videos:dry": "node src/scripts/preprocess-videos.js --dry-run",
+    "preprocess-images": "node src/scripts/preprocess-images.js",
+    "preprocess-images:dry": "node src/scripts/preprocess-images.js --dry-run",
     "worker": "cross-env NODE_ENV=production node src/worker.js",
     "check:placeholder": "node src/scripts/check-placeholder.js",
     "check:placeholder-routes": "node src/scripts/check-placeholder-routes.js"

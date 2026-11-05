@@ -19,6 +19,7 @@ const {
   sniff,
   isVideoKind,
   isAudioKind,
+  isImageKind,
   readHead,
   prependHead,
   SIGNATURE_BYTES,
@@ -54,6 +55,7 @@ const {
 } = require("../services/videoPreprocessor");
 const { getStoryUrls } = require("../services/storyVideoService");
 const { enqueueVideoJob } = require("../services/videoQueue");
+const { warmTinyPreview, runPool } = require("../services/tinyPreview");
 
 // Spreadsheet types. The extension cannot come from the bytes here — .xlsx and
 // .xlsm are both ZIP archives — so the extension is checked against this map and
@@ -66,6 +68,11 @@ const EXCEL_CONTENT_TYPES = {
   xlsb: "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
 };
 const EXCEL_CONTAINER_BY_EXT = { xlsx: "zip", xlsm: "zip", xlsb: "zip", xls: "ole2" };
+
+// How many tiny copies one bulk upload makes at once. Each one holds its original
+// in memory. One at a time could keep a 50-file response waiting past the CDN
+// timeout, and the client would then report a failed upload.
+const BULK_TINY_PREVIEW_CONCURRENCY = 3;
 
 function deliveryUrl(folder, relativePath, resourceType) {
   // The profile folder keeps its bare-path form, as the existing route returns.
@@ -180,6 +187,12 @@ async function gatedUploadRoutes(fastify) {
             url: deliveryUrl(record.folder, relativePath, resourceType),
           };
 
+          // This route never holds the file in memory, so the tiny copy reads it
+          // back from storage.
+          if (isImageKind(sniffed.kind)) {
+            await warmTinyPreview({ key, metadata, log: request.log });
+          }
+
           if (isVideo) {
             item.variants = getVariantUrls(relativePath);
             if (record.story === true) {
@@ -270,7 +283,7 @@ async function gatedUploadRoutes(fastify) {
             limit: record.max_bytes,
           });
           assertNotTruncated(part);
-          stored.push({ key, size });
+          stored.push({ key, size, isImage: isImageKind(sniffed.kind) });
         }
       } catch (err) {
         if (isTooLargeError(err)) {
@@ -282,6 +295,13 @@ async function gatedUploadRoutes(fastify) {
       if (stored.length === 0 && skipped.length === 0) {
         return reply.code(400).send({ error: "At least one file is required" });
       }
+
+      // After the loop, so the multipart stream is not held open while Sharp runs.
+      await runPool(
+        stored.filter((item) => item.isImage),
+        BULK_TINY_PREVIEW_CONCURRENCY,
+        ({ key }) => warmTinyPreview({ key, metadata, log: request.log }),
+      );
 
       request._logExtra = {
         component: "GatedUploadRoute",

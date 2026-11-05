@@ -6,6 +6,7 @@ const {
   sniff,
   isVideoKind,
   isAudioKind,
+  isImageKind,
   SIGNATURE_BYTES,
 } = require("../utils/byteSniffer");
 const {
@@ -22,6 +23,7 @@ const { probeMedia, extractSnapshot } = require("../processors/videoProcessor");
 const { isWebPlayable } = require("../utils/mediaProbe");
 const { checkCache, saveToCache } = require("../services/cacheService");
 const { enqueueVideoJob } = require("../services/videoQueue");
+const { warmTinyPreview } = require("../services/tinyPreview");
 
 const IMAGE_MAX_MB = Number.parseInt(process.env.IMAGE_MAX_FILE_SIZE_MB || "10", 10) || 10;
 const VIDEO_MAX_MB = Number.parseInt(process.env.VIDEO_MAX_FILE_SIZE_MB || "10", 10) || 10;
@@ -94,6 +96,12 @@ async function saveUploadedImage(
     : `originals/${generatedFilename}`;
 
   await putObject(key, buffer, sniffed.contentType);
+
+  // The bytes decide, not `resourceType`: a PDF or an unknown file also gets the
+  // type "image" below, and Sharp cannot read those.
+  if (isImageKind(sniffed.kind)) {
+    await warmTinyPreview({ key, buffer, log: opts.log });
+  }
 
   const relativePath = key.replace(/^originals\//, "");
 
@@ -242,7 +250,7 @@ async function uploadRoutes(fastify) {
         dataFilename,
         dataMimetype,
         folder,
-        { story: storyMode },
+        { story: storyMode, log: request.log },
       );
 
       if (item.type === "video") {
@@ -379,7 +387,7 @@ async function uploadRoutes(fastify) {
           filename,
           mimetype,
           folder,
-          { story: storyMode },
+          { story: storyMode, log: request.log },
         );
 
         if (item.type === "video") {
