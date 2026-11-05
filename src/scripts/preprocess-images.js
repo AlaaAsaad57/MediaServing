@@ -26,6 +26,7 @@ require("../config/env");
 const { s3, BUCKET, getObjectBuffer } = require("../storage/s3Client");
 const { checkCache } = require("../services/cacheService");
 const {
+  isLargeSvg,
   tinyPreviewKey,
   saveTinyPreview,
   runPool,
@@ -82,6 +83,8 @@ function parseArgs(argv) {
 }
 
 // ── S3 list helpers ───────────────────────────────────────────────────────────
+let largeSvgs = 0;
+
 async function* listImageKeys(prefix) {
   let continuationToken;
   do {
@@ -92,9 +95,12 @@ async function* listImageKeys(prefix) {
     });
     const res = await s3.send(cmd);
     for (const obj of res.Contents || []) {
-      if (isImageKey(obj.Key)) {
-        yield obj.Key;
+      if (!isImageKey(obj.Key)) continue;
+      if (isLargeSvg(obj.Key, obj.Size)) {
+        largeSvgs++;
+        continue;
       }
+      yield obj.Key;
     }
     continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
   } while (continuationToken);
@@ -117,7 +123,8 @@ async function main() {
   for await (const key of listImageKeys(opts.prefix)) {
     imageKeys.push(key);
   }
-  console.log(`found ${imageKeys.length} image(s)\n`);
+  console.log(`found ${imageKeys.length} image(s)`);
+  console.log(`Left for their first GET: ${largeSvgs} large SVG(s)\n`);
 
   if (imageKeys.length === 0) {
     console.log("Nothing to do.");

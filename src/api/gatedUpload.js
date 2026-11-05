@@ -190,7 +190,7 @@ async function gatedUploadRoutes(fastify) {
           // This route never holds the file in memory, so the tiny copy reads it
           // back from storage.
           if (isImageKind(sniffed.kind)) {
-            await warmTinyPreview({ key, metadata, log: request.log });
+            await warmTinyPreview({ key, size, metadata, log: request.log });
           }
 
           if (isVideo) {
@@ -300,7 +300,7 @@ async function gatedUploadRoutes(fastify) {
       await runPool(
         stored.filter((item) => item.isImage),
         BULK_TINY_PREVIEW_CONCURRENCY,
-        ({ key }) => warmTinyPreview({ key, metadata, log: request.log }),
+        ({ key, size }) => warmTinyPreview({ key, size, metadata, log: request.log }),
       );
 
       request._logExtra = {

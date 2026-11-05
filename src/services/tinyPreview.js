@@ -17,11 +17,23 @@ const { saveToCache } = require("./cacheService");
 // Do not join them for parseParams: it reads "w_24/f_webp/q_25" as just { w: 24 }.
 const TINY_PREVIEW_SEGMENTS = ["w_24", "f_webp", "q_25"];
 
+// Above this size an SVG waits for its first GET. One 9 MB SVG took 5.4 seconds and
+// about 750 MB to draw, and neither an upload nor the backfill should risk that.
+const SVG_WARM_MAX_BYTES = 1024 * 1024;
+
+function isSvgKey(originalKey) {
+  return originalKey.toLowerCase().endsWith(".svg");
+}
+
+function isLargeSvg(originalKey, size) {
+  return isSvgKey(originalKey) && size > SVG_WARM_MAX_BYTES;
+}
+
 // The same params handleImage in api/transform.js hashes for this URL. That route
 // forces PNG for an SVG source, so the key for an SVG has f=png, not f=webp.
 function tinyPreviewParams(originalKey) {
   const params = parseChainedTransformations(TINY_PREVIEW_SEGMENTS);
-  if (originalKey.toLowerCase().endsWith(".svg")) params.f = "png";
+  if (isSvgKey(originalKey)) params.f = "png";
   return params;
 }
 
@@ -53,9 +65,12 @@ async function saveTinyPreview(originalKey, originalBuffer, metadata) {
  * The upload routes' version: it never throws, so a failed tiny copy cannot fail
  * an upload. The delivery route still makes the copy on demand.
  *
- * Without `buffer`, the original is read back from storage.
+ * Without `buffer`, the original is read back from storage, and `size` must be
+ * given so a large SVG is skipped before that read.
  */
-async function warmTinyPreview({ key, buffer, metadata, log }) {
+async function warmTinyPreview({ key, buffer, size = buffer?.length, metadata, log }) {
+  if (isLargeSvg(key, size)) return;
+
   try {
     const source = buffer || (await getObjectBuffer(key)).buffer;
     await saveTinyPreview(key, source, metadata);
@@ -82,6 +97,7 @@ async function runPool(items, concurrency, fn) {
 }
 
 module.exports = {
+  isLargeSvg,
   tinyPreviewParams,
   tinyPreviewKey,
   saveTinyPreview,
