@@ -1,0 +1,100 @@
+# MediaServing on the shared staging server (rootless Docker + Nginx + Cloudflare).
+#
+# Run from the repo folder on the server:
+#   docker compose -f docker-compose.server.yml up -d --build
+#
+# Services:
+#   - app:    Fastify HTTP API, bound ONLY to 127.0.0.1:${MEDIA_PORT:-4001}
+#   - worker: BullMQ async video processor (required for polished video variants)
+#   - redis:  Private Redis for locks, gated upload tickets, and BullMQ jobs
+#             (no host port published; unreachable from outside this stack)
+
+x-common-env: &common-env
+  NODE_ENV: production
+  # Always use this stack's private Redis container (isolated from prod Redis).
+  REDIS_URL: redis://redis:6379
+  NODE_OPTIONS: --max-old-space-size=2048
+  # TASK concurrency: ffmpeg encodes within one unit of work.
+  VIDEO_PREPROCESS_CONCURRENCY: "1"
+  # JOB concurrency: how many queue jobs run at once (worker only).
+  VIDEO_JOB_CONCURRENCY: "2"
+  VIDEO_JOB_TIMEOUT_MS: "300000"
+  PREVIEW_DURATION_SECONDS: "6"
+  PREVIEW_VARIANT_TRANSFORM: w_400,h_600,f_mp4,vc_h264,q_65,c_fill
+  FFMPEG_X264_PRESET: veryfast
+  FFMPEG_X265_PRESET: veryfast
+  FFMPEG_THREADS: "2"
+  FFMPEG_VP9_DEADLINE: realtime
+  FFMPEG_VP9_CPU_USED: "6"
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mediaserving-server:latest
+    container_name: mediaserving-app
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - .env.server
+    environment:
+      <<: *common-env
+    # 127.0.0.1 only. The server's nginx is the single public entry point.
+    ports:
+      - "127.0.0.1:${MEDIA_PORT:-4001}:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging: *json-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mediaserving-server:latest
+    container_name: mediaserving-worker
+    command: ["dumb-init", "node", "src/worker.js"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - .env.server
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    logging: *json-logging
+
+  redis:
+    image: redis:7-alpine
+    container_name: mediaserving-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - mediaserving-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mediaserving-redis-data:
